@@ -46,3 +46,4 @@ Builds/
 JuceLibraryCode
 bin/
 out/
+.vs/

@@ -7,44 +7,59 @@
               cppLanguageStandard="17">
   <MAINGROUP id="MzQu0K" name="chief-lp6">
     <GROUP id="{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}" name="Source">
+      <FILE id="F8Audio" name="AudioChannel.cpp" compile="1" resource="0"
+            file="AudioChannel.cpp"/>
+      <FILE id="F8AudioH" name="AudioChannel.h" compile="0" resource="0"
+            file="AudioChannel.h"/>
+      <FILE id="F5Audio" name="AudioEngine.cpp" compile="1" resource="0"
+            file="AudioEngine.cpp"/>
+      <FILE id="F5AudioH" name="AudioEngine.h" compile="0" resource="0" file="AudioEngine.h"/>
+      <FILE id="Ba6gLh" name="build_test.sh" compile="0" resource="1" file="build_test.sh"/>
+      <FILE id="F7Chan" name="Channel.cpp" compile="1" resource="0" file="Channel.cpp"/>
+      <FILE id="F7ChanH" name="Channel.h" compile="0" resource="0" file="Channel.h"/>
+      <FILE id="F3ChanS" name="ChannelStripComponent.cpp" compile="1" resource="0"
+            file="ChannelStripComponent.cpp"/>
+      <FILE id="F3ChanSH" name="ChannelStripComponent.h" compile="0" resource="0"
+            file="ChannelStripComponent.h"/>
+      <FILE id="ftQWtP" name="chief_lp6_logo.png" compile="0" resource="1"
+            file="chief_lp6_logo.png"/>
+      <FILE id="F13Comm" name="Command.h" compile="0" resource="0" file="Command.h"/>
+      <FILE id="F6Loop" name="LoopEngine.cpp" compile="1" resource="0" file="LoopEngine.cpp"/>
+      <FILE id="F6LoopH" name="LoopEngine.h" compile="0" resource="0" file="LoopEngine.h"/>
       <FILE id="F1Main" name="Main.cpp" compile="1" resource="0" file="Main.cpp"/>
       <FILE id="F2MainC" name="MainComponent.cpp" compile="1" resource="0"
             file="MainComponent.cpp"/>
       <FILE id="F2MainH" name="MainComponent.h" compile="0" resource="0"
             file="MainComponent.h"/>
-      <FILE id="F3ChanS" name="ChannelStripComponent.cpp" compile="1" resource="0"
-            file="ChannelStripComponent.cpp"/>
-      <FILE id="F3ChanSH" name="ChannelStripComponent.h" compile="0" resource="0"
-            file="ChannelStripComponent.h"/>
-      <FILE id="F4Trans" name="TransportComponent.cpp" compile="1" resource="0"
-            file="TransportComponent.cpp"/>
-      <FILE id="F4TransH" name="TransportComponent.h" compile="0" resource="0"
-            file="TransportComponent.h"/>
-      <FILE id="F5Audio" name="AudioEngine.cpp" compile="1" resource="0"
-            file="AudioEngine.cpp"/>
-      <FILE id="F5AudioH" name="AudioEngine.h" compile="0" resource="0" file="AudioEngine.h"/>
-      <FILE id="F6Loop" name="LoopEngine.cpp" compile="1" resource="0" file="LoopEngine.cpp"/>
-      <FILE id="F6LoopH" name="LoopEngine.h" compile="0" resource="0" file="LoopEngine.h"/>
-      <FILE id="F7Chan" name="Channel.cpp" compile="1" resource="0" file="Channel.cpp"/>
-      <FILE id="F7ChanH" name="Channel.h" compile="0" resource="0" file="Channel.h"/>
-      <FILE id="F8Audio" name="AudioChannel.cpp" compile="1" resource="0"
-            file="AudioChannel.cpp"/>
-      <FILE id="F8AudioH" name="AudioChannel.h" compile="0" resource="0"
-            file="AudioChannel.h"/>
-      <FILE id="F9VSTi" name="VSTiChannel.cpp" compile="1" resource="0" file="VSTiChannel.cpp"/>
-      <FILE id="F9VSTiH" name="VSTiChannel.h" compile="0" resource="0" file="VSTiChannel.h"/>
+      <FILE id="lF67FX" name="MidiLearnManager.cpp" compile="1" resource="0"
+            file="MidiLearnManager.cpp"/>
+      <FILE id="LtpVRL" name="MidiLearnManager.h" compile="0" resource="0"
+            file="MidiLearnManager.h"/>
       <FILE id="F10Plug" name="PluginHostWrapper.cpp" compile="1" resource="0"
             file="PluginHostWrapper.cpp"/>
       <FILE id="F10PlugH" name="PluginHostWrapper.h" compile="0" resource="0"
             file="PluginHostWrapper.h"/>
-      <FILE id="F11Song" name="SongManager.cpp" compile="1" resource="0"
-            file="SongManager.cpp"/>
-      <FILE id="F11SongH" name="SongManager.h" compile="0" resource="0" file="SongManager.h"/>
+      <FILE id="C2kYFA" name="PluginManagerComponent.cpp" compile="1" resource="0"
+            file="PluginManagerComponent.cpp"/>
+      <FILE id="xgwRti" name="PluginManagerComponent.h" compile="0" resource="0"
+            file="PluginManagerComponent.h"/>
+      <FILE id="FwWUTA" name="RoutingComponent.cpp" compile="1" resource="0"
+            file="RoutingComponent.cpp"/>
+      <FILE id="LXjFf9" name="RoutingComponent.h" compile="0" resource="0"
+            file="RoutingComponent.h"/>
       <FILE id="F12Show" name="ShowManager.cpp" compile="1" resource="0"
             file="ShowManager.cpp"/>
       <FILE id="F12ShowH" name="ShowManager.h" compile="0" resource="0" file="ShowManager.h"/>
-      <FILE id="F13Comm" name="Command.h" compile="0" resource="0" file="Command.h"/>
       <FILE id="F14Song" name="Song.h" compile="0" resource="0" file="Song.h"/>
+      <FILE id="F11Song" name="SongManager.cpp" compile="1" resource="0"
+            file="SongManager.cpp"/>
+      <FILE id="F11SongH" name="SongManager.h" compile="0" resource="0" file="SongManager.h"/>
+      <FILE id="F4Trans" name="TransportComponent.cpp" compile="1" resource="0"
+            file="TransportComponent.cpp"/>
+      <FILE id="F4TransH" name="TransportComponent.h" compile="0" resource="0"
+            file="TransportComponent.h"/>
+      <FILE id="F9VSTi" name="VSTiChannel.cpp" compile="1" resource="0" file="VSTiChannel.cpp"/>
+      <FILE id="F9VSTiH" name="VSTiChannel.h" compile="0" resource="0" file="VSTiChannel.h"/>
     </GROUP>
   </MAINGROUP>
   <JUCEOPTIONS JUCE_STRICT_REFCOUNTEDPOINTER="1" JUCE_WEB_BROWSER="0" JUCE_USE_CURL="0"/>
