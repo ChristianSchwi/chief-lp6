@@ -48,6 +48,9 @@
             file="RoutingComponent.cpp"/>
       <FILE id="LXjFf9" name="RoutingComponent.h" compile="0" resource="0"
             file="RoutingComponent.h"/>
+      <FILE id="fksuBH" name="ShowComponent.cpp" compile="1" resource="0"
+            file="ShowComponent.cpp"/>
+      <FILE id="ZJ1yaZ" name="ShowComponent.h" compile="0" resource="0" file="ShowComponent.h"/>
       <FILE id="F12Show" name="ShowManager.cpp" compile="1" resource="0"
             file="ShowManager.cpp"/>
       <FILE id="F12ShowH" name="ShowManager.h" compile="0" resource="0" file="ShowManager.h"/>

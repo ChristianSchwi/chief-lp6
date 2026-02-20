@@ -2,80 +2,45 @@
 
 //==============================================================================
 Channel::Channel(int index, ChannelType type)
-    : channelIndex(index)
-    , channelType(type)
-{
-}
+    : channelIndex(index), channelType(type) {}
 
 //==============================================================================
-// Preparation and Resource Management
-//==============================================================================
-
-void Channel::prepareToPlay(double newSampleRate,
-                           int newMaxBlockSize,
-                           juce::int64 maxLoopLengthSamples)
+void Channel::prepareToPlay(double newSampleRate, int newMaxBlockSize,
+                            juce::int64 maxLoopLengthSamples)
 {
-    sampleRate = newSampleRate;
-    maxBlockSize = newMaxBlockSize;
+    sampleRate     = newSampleRate;
+    maxBlockSize   = newMaxBlockSize;
     loopBufferSize = maxLoopLengthSamples;
-    
-    // Allocate loop buffer (stereo, pre-allocated to maximum size)
-    loopBuffer.setSize(2, static_cast<int>(maxLoopLengthSamples), false, true, true);
-    loopBuffer.clear();
-    
-    // Allocate working buffers
-    workingBuffer.setSize(2, maxBlockSize * 2, false, true, true);  // Extra space for safety
-    fxBuffer.setSize(2, maxBlockSize * 2, false, true, true);
-    
+
+    loopBuffer   .setSize(2, static_cast<int>(maxLoopLengthSamples), false, true, true);
+    workingBuffer.setSize(2, newMaxBlockSize * 2,                     false, true, true);
+    fxBuffer     .setSize(2, newMaxBlockSize * 2,                     false, true, true);
+    loopBuffer   .clear();
     workingBuffer.clear();
-    fxBuffer.clear();
-    
-    // Prepare plugins
+    fxBuffer     .clear();
+
     for (auto& slot : fxChain)
     {
         if (slot.plugin && !slot.crashed.load(std::memory_order_relaxed))
         {
-            try
-            {
-                slot.plugin->prepareToPlay(sampleRate, maxBlockSize);
-            }
-            catch (...)
-            {
-                DBG("Plugin crashed during prepareToPlay() in channel " + juce::String(channelIndex));
-                slot.crashed.store(true, std::memory_order_release);
-            }
+            try   { slot.plugin->prepareToPlay(sampleRate, maxBlockSize); }
+            catch (...) { slot.crashed.store(true, std::memory_order_release); }
         }
     }
-    
-    DBG("Channel " + juce::String(channelIndex) + " prepared: " +
-        juce::String(sampleRate) + " Hz, " +
-        juce::String(maxBlockSize) + " samples, " +
-        juce::String(maxLoopLengthSamples) + " loop samples");
 }
 
 void Channel::releaseResources()
 {
-    // Release plugin resources
     for (auto& slot : fxChain)
-    {
         if (slot.plugin && !slot.crashed.load(std::memory_order_relaxed))
         {
-            try
-            {
-                slot.plugin->releaseResources();
-            }
-            catch (...)
-            {
-                DBG("Plugin crashed during releaseResources() in channel " + juce::String(channelIndex));
-                slot.crashed.store(true, std::memory_order_release);
-            }
+            try   { slot.plugin->releaseResources(); }
+            catch (...) { slot.crashed.store(true, std::memory_order_release); }
         }
-    }
-    
-    // Clear buffers (free memory)
-    loopBuffer.setSize(0, 0);
+
+    loopBuffer   .setSize(0, 0);
     workingBuffer.setSize(0, 0);
-    fxBuffer.setSize(0, 0);
+    fxBuffer     .setSize(0, 0);
 }
 
 //==============================================================================
@@ -84,116 +49,56 @@ void Channel::releaseResources()
 
 void Channel::startRecording(bool isOverdub)
 {
-    ChannelState currentState = state.load(std::memory_order_relaxed);
-    
-    if (isOverdub)
-    {
-        // Can only overdub if we have existing content
-        if (loopHasContent.load(std::memory_order_relaxed))
-        {
-            state.store(ChannelState::Overdubbing, std::memory_order_release);
-            DBG("Channel " + juce::String(channelIndex) + " started overdubbing");
-        }
-    }
+    if (isOverdub && loopHasContent.load(std::memory_order_relaxed))
+        state.store(ChannelState::Overdubbing, std::memory_order_release);
     else
-    {
-        // Fresh recording
-        state.store(ChannelState::Recording, std::memory_order_release);
-        DBG("Channel " + juce::String(channelIndex) + " started recording");
-    }
+        state.store(ChannelState::Recording,   std::memory_order_release);
 }
 
 void Channel::stopRecording()
 {
-    ChannelState currentState = state.load(std::memory_order_relaxed);
-    
-    if (currentState == ChannelState::Recording)
+    const auto cur = state.load(std::memory_order_relaxed);
+    if (cur == ChannelState::Recording || cur == ChannelState::Overdubbing)
     {
-        // First recording completed - we now have content
         loopHasContent.store(true, std::memory_order_release);
         state.store(ChannelState::Playing, std::memory_order_release);
-        DBG("Channel " + juce::String(channelIndex) + " recording complete, now playing");
-    }
-    else if (currentState == ChannelState::Overdubbing)
-    {
-        // Overdub complete - return to playing
-        state.store(ChannelState::Playing, std::memory_order_release);
-        DBG("Channel " + juce::String(channelIndex) + " overdub complete, now playing");
     }
 }
 
 void Channel::startPlayback()
 {
     if (loopHasContent.load(std::memory_order_relaxed))
-    {
         state.store(ChannelState::Playing, std::memory_order_release);
-        DBG("Channel " + juce::String(channelIndex) + " started playback");
-    }
 }
 
 void Channel::stopPlayback()
 {
     state.store(ChannelState::Idle, std::memory_order_release);
-    DBG("Channel " + juce::String(channelIndex) + " stopped playback");
 }
 
 void Channel::clearLoop()
 {
     state.store(ChannelState::Idle, std::memory_order_release);
-    loopHasContent.store(false, std::memory_order_release);
+    loopHasContent.store(false,     std::memory_order_release);
     loopBuffer.clear();
-    DBG("Channel " + juce::String(channelIndex) + " loop cleared");
 }
 
 //==============================================================================
-// Parameter Control
+// Parameters
 //==============================================================================
 
 void Channel::setGainDb(float gainDb)
 {
-    // Clamp to reasonable range
-    gainDb = juce::jlimit(-60.0f, 12.0f, gainDb);
-    gainLinear.store(dbToLinear(gainDb), std::memory_order_release);
+    gainLinear.store(dbToLinear(juce::jlimit(-60.0f, 12.0f, gainDb)),
+                     std::memory_order_release);
 }
 
-float Channel::getGainDb() const
-{
-    return linearToDb(gainLinear.load(std::memory_order_relaxed));
-}
-
-void Channel::setMonitorMode(MonitorMode mode)
-{
-    monitorMode.store(mode, std::memory_order_release);
-}
-
-MonitorMode Channel::getMonitorMode() const
-{
-    return monitorMode.load(std::memory_order_relaxed);
-}
-
-void Channel::setMuted(bool shouldMute)
-{
-    muted.store(shouldMute, std::memory_order_release);
-}
-
-void Channel::setSolo(bool shouldSolo)
-{
-    solo.store(shouldSolo, std::memory_order_release);
-}
-
-//==============================================================================
-// Routing
-//==============================================================================
-
-void Channel::setRouting(const RoutingConfig& config)
-{
-    // WARNING: This should only be called from audio thread or via Command system!
-    // Calling from message thread while audio is running causes race conditions.
-    // The routing struct is read by audio thread without synchronization.
-    
-    routing = config;
-    DBG("Channel " + juce::String(channelIndex) + " routing updated");
-}
+float       Channel::getGainDb()     const { return linearToDb(gainLinear.load(std::memory_order_relaxed)); }
+void        Channel::setMonitorMode(MonitorMode m) { monitorMode.store(m, std::memory_order_release); }
+MonitorMode Channel::getMonitorMode() const        { return monitorMode.load(std::memory_order_relaxed); }
+void        Channel::setMuted(bool v)  { muted.store(v, std::memory_order_release); }
+void        Channel::setSolo (bool v)  { solo .store(v, std::memory_order_release); }
+void        Channel::setRouting(const RoutingConfig& c) { routing = c; }
 
 //==============================================================================
 // Plugin Management
@@ -202,68 +107,36 @@ void Channel::setRouting(const RoutingConfig& config)
 void Channel::addPlugin(int slotIndex, std::unique_ptr<juce::AudioPluginInstance> plugin)
 {
     jassert(slotIndex >= 0 && slotIndex < 3);
-    
     auto& slot = fxChain[slotIndex];
-    
-    // THREAD-SAFE PLUGIN SWAP:
-    // 1. Set bypass flag (audio thread will skip this slot)
+
     slot.bypassed.store(true, std::memory_order_release);
-    
-    // 2. Small delay to ensure audio thread has seen bypass flag
-    //    This is a simplified approach; proper solution would use lock-free queue
-    juce::Thread::sleep(10);  // 10ms should cover any audio callback
-    
-    // 3. Release old plugin if present (now safe - audio thread bypassing)
-    if (slot.plugin)
-    {
-        slot.plugin->releaseResources();
-        slot.plugin.reset();
-    }
-    
-    // 4. Install new plugin
+    juce::Thread::sleep(10);
+
+    if (slot.plugin) { slot.plugin->releaseResources(); slot.plugin.reset(); }
+
     slot.plugin = std::move(plugin);
     slot.crashed.store(false, std::memory_order_release);
-    
-    // 5. Prepare new plugin
+
     if (slot.plugin)
     {
         try
         {
             slot.plugin->prepareToPlay(sampleRate, maxBlockSize);
-            
-            // 6. Re-enable (audio thread can now use new plugin)
             slot.bypassed.store(false, std::memory_order_release);
         }
-        catch (...)
-        {
-            DBG("Plugin crashed during prepareToPlay() on load");
-            slot.crashed.store(true, std::memory_order_release);
-            // Keep bypassed = true since plugin crashed
-        }
+        catch (...) { slot.crashed.store(true, std::memory_order_release); }
     }
 }
 
 void Channel::removePlugin(int slotIndex)
 {
     jassert(slotIndex >= 0 && slotIndex < 3);
-    
     auto& slot = fxChain[slotIndex];
-    
-    if (!slot.plugin)
-        return;  // Nothing to remove
-    
-    // THREAD-SAFE PLUGIN REMOVAL:
-    // 1. Set bypass flag
+    if (!slot.plugin) return;
     slot.bypassed.store(true, std::memory_order_release);
-    
-    // 2. Small delay to ensure audio thread has seen bypass
     juce::Thread::sleep(10);
-    
-    // 3. Release plugin (now safe)
     slot.plugin->releaseResources();
     slot.plugin.reset();
-    
-    // 4. Clear flags
     slot.crashed.store(false, std::memory_order_release);
 }
 
@@ -279,185 +152,150 @@ bool Channel::isPluginBypassed(int slotIndex) const
     return fxChain[slotIndex].bypassed.load(std::memory_order_relaxed);
 }
 
+juce::AudioPluginInstance* Channel::getPlugin(int slotIndex) const
+{
+    if (slotIndex < 0 || slotIndex >= 3) return nullptr;
+    const auto& slot = fxChain[slotIndex];
+    if (slot.crashed.load(std::memory_order_relaxed)) return nullptr;
+    return slot.plugin.get();  // non-owning — caller must not delete
+}
+
 //==============================================================================
-// Protected Processing Helpers
+// Loop Buffer I/O (Message Thread)
+//==============================================================================
+
+bool Channel::loadLoopData(const juce::AudioBuffer<float>& source, juce::int64 numSamples)
+{
+    if (numSamples <= 0)
+    {
+        DBG("Channel " + juce::String(channelIndex) + ": loadLoopData — numSamples=0");
+        return false;
+    }
+    if (source.getNumChannels() < 2)
+    {
+        DBG("Channel " + juce::String(channelIndex) + ": loadLoopData — source not stereo");
+        return false;
+    }
+
+    // BUG 2 FIX: Guard against call before prepareToPlay()
+    if (loopBufferSize == 0 || loopBuffer.getNumSamples() == 0)
+    {
+        DBG("Channel " + juce::String(channelIndex) +
+            ": loadLoopData — called before prepareToPlay(), skipping");
+        return false;
+    }
+
+    const juce::int64 samplesToLoad = juce::jmin(numSamples, loopBufferSize);
+
+    if (source.getNumSamples() < static_cast<int>(samplesToLoad))
+    {
+        DBG("Channel " + juce::String(channelIndex) + ": loadLoopData — source buffer too small");
+        return false;
+    }
+
+    loopBuffer.clear();
+    for (int ch = 0; ch < 2; ++ch)
+        loopBuffer.copyFrom(ch, 0, source, ch, 0, static_cast<int>(samplesToLoad));
+
+    loopHasContent.store(true, std::memory_order_release);
+
+    DBG("Channel " + juce::String(channelIndex) + ": loaded " +
+        juce::String(samplesToLoad) + " samples into loop buffer");
+
+    return true;
+}
+
+//==============================================================================
+// Protected Helpers
 //==============================================================================
 
 void Channel::processFXChain(juce::AudioBuffer<float>& buffer,
-                            int numSamples,
-                            juce::MidiBuffer& midiBuffer)
+                             int numSamples,
+                             juce::MidiBuffer& midiBuffer)
 {
-    // Process through each plugin slot
     for (auto& slot : fxChain)
     {
-        // Check if bypassed first (atomic read)
-        if (slot.bypassed.load(std::memory_order_acquire))
-            continue;
-        
-        // Check if crashed
-        if (slot.crashed.load(std::memory_order_acquire))
-            continue;
-        
-        // Double-check plugin pointer (could be swapped between bypass check and here)
-        if (slot.plugin == nullptr)
-            continue;
-        
-        // Process plugin with crash protection
-        try
-        {
-            slot.plugin->processBlock(buffer, midiBuffer);
-        }
+        if (slot.bypassed.load(std::memory_order_acquire)) continue;
+        if (slot.crashed .load(std::memory_order_acquire)) continue;
+        if (!slot.plugin)                                   continue;
+        try   { slot.plugin->processBlock(buffer, midiBuffer); }
         catch (...)
         {
-            // Plugin crashed - mark as crashed and bypass
             slot.crashed.store(true, std::memory_order_release);
-            DBG("Plugin crashed in channel " + juce::String(channelIndex) + " FX chain!");
-            
-            // Could trigger async notification to GUI here
+            DBG("FX plugin crashed in channel " + juce::String(channelIndex));
         }
     }
 }
 
 void Channel::recordToLoop(const juce::AudioBuffer<float>& source,
-                          juce::int64 startPosition,
-                          int numSamples,
-                          bool isOverdub)
+                           juce::int64 startPosition, int numSamples, bool isOverdub)
 {
-    if (numSamples <= 0 || startPosition < 0)
-        return;
-    
-    if (loopBufferSize <= 0)
-        return;
-    
-    if (source.getNumSamples() < numSamples)
-        return;  // Source buffer too small
-    
-    // Handle wrapping at loop boundary
+    if (numSamples <= 0 || startPosition < 0 || loopBufferSize <= 0) return;
+    if (source.getNumSamples() < numSamples) return;
+
     juce::int64 writePos = startPosition % loopBufferSize;
-    int samplesRemaining = numSamples;
-    int sourcePos = 0;
-    
-    while (samplesRemaining > 0)
+    int         srcPos   = 0;
+    int         remaining = numSamples;
+
+    while (remaining > 0)
     {
-        // Calculate samples until loop end
-        const juce::int64 samplesToEnd = loopBufferSize - writePos;
-        const int samplesThisIteration = static_cast<int>(juce::jmin(
-            static_cast<juce::int64>(samplesRemaining),
-            samplesToEnd
-        ));
-        
-        // Ensure we don't write beyond loop buffer
-        if (writePos + samplesThisIteration > loopBufferSize)
-            break;
-        
-        if (isOverdub)
+        const int thisBlock = static_cast<int>(
+            juce::jmin(static_cast<juce::int64>(remaining), loopBufferSize - writePos));
+        if (thisBlock <= 0) break;
+
+        for (int ch = 0; ch < juce::jmin(2, source.getNumChannels()); ++ch)
         {
-            // Overdub mode: ADD to existing content
-            for (int ch = 0; ch < juce::jmin(2, source.getNumChannels()); ++ch)
-            {
-                loopBuffer.addFrom(ch, static_cast<int>(writePos),
-                                 source, ch, sourcePos,
-                                 samplesThisIteration);
-            }
+            if (isOverdub)
+                loopBuffer.addFrom (ch, static_cast<int>(writePos), source, ch, srcPos, thisBlock);
+            else
+                loopBuffer.copyFrom(ch, static_cast<int>(writePos), source, ch, srcPos, thisBlock);
         }
-        else
-        {
-            // Recording mode: REPLACE existing content
-            for (int ch = 0; ch < juce::jmin(2, source.getNumChannels()); ++ch)
-            {
-                loopBuffer.copyFrom(ch, static_cast<int>(writePos),
-                                  source, ch, sourcePos,
-                                  samplesThisIteration);
-            }
-        }
-        
-        sourcePos += samplesThisIteration;
-        samplesRemaining -= samplesThisIteration;
-        writePos = (writePos + samplesThisIteration) % loopBufferSize;
+
+        srcPos    += thisBlock;
+        remaining -= thisBlock;
+        writePos   = (writePos + thisBlock) % loopBufferSize;
     }
 }
 
 void Channel::playFromLoop(juce::AudioBuffer<float>& dest,
-                          juce::int64 startPosition,
-                          int numSamples)
+                           juce::int64 startPosition, int numSamples)
 {
-    if (numSamples <= 0 || startPosition < 0)
-        return;
-    
-    if (!loopHasContent.load(std::memory_order_relaxed))
-        return;
-    
-    if (loopBufferSize <= 0)
-        return;
-    
-    // Handle wrapping at loop boundary
-    juce::int64 readPos = startPosition % loopBufferSize;
-    int samplesRemaining = numSamples;
-    int destPos = 0;
-    
-    while (samplesRemaining > 0)
+    if (numSamples <= 0 || startPosition < 0 || loopBufferSize <= 0) return;
+    if (!loopHasContent.load(std::memory_order_relaxed)) return;
+
+    juce::int64 readPos   = startPosition % loopBufferSize;
+    int         destPos   = 0;
+    int         remaining = numSamples;
+
+    while (remaining > 0)
     {
-        // Calculate samples until loop end
-        const juce::int64 samplesToEnd = loopBufferSize - readPos;
-        const int samplesThisIteration = static_cast<int>(juce::jmin(
-            static_cast<juce::int64>(samplesRemaining),
-            samplesToEnd
-        ));
-        
-        // Ensure we don't read beyond destination buffer
-        if (destPos + samplesThisIteration > dest.getNumSamples())
-            break;
-        
-        // Copy from loop buffer to destination
+        const int thisBlock = static_cast<int>(
+            juce::jmin(static_cast<juce::int64>(remaining), loopBufferSize - readPos));
+        if (thisBlock <= 0 || destPos + thisBlock > dest.getNumSamples()) break;
+
         for (int ch = 0; ch < juce::jmin(2, dest.getNumChannels()); ++ch)
-        {
-            dest.copyFrom(ch, destPos,
-                         loopBuffer, ch, static_cast<int>(readPos),
-                         samplesThisIteration);
-        }
-        
-        destPos += samplesThisIteration;
-        samplesRemaining -= samplesThisIteration;
-        readPos = (readPos + samplesThisIteration) % loopBufferSize;
+            dest.copyFrom(ch, destPos, loopBuffer, ch, static_cast<int>(readPos), thisBlock);
+
+        destPos   += thisBlock;
+        remaining -= thisBlock;
+        readPos    = (readPos + thisBlock) % loopBufferSize;
     }
 }
 
 bool Channel::shouldMonitor() const
 {
-    const MonitorMode mode = monitorMode.load(std::memory_order_relaxed);
-    const ChannelState currentState = state.load(std::memory_order_relaxed);
-    
+    const auto mode = monitorMode.load(std::memory_order_relaxed);
+    const auto cur  = state      .load(std::memory_order_relaxed);
     switch (mode)
     {
-        case MonitorMode::Off:
-            return false;
-        
-        case MonitorMode::AlwaysOn:
-            return true;
-        
-        case MonitorMode::WhileRecording:
-            return (currentState == ChannelState::Recording || 
-                    currentState == ChannelState::Overdubbing);
-        
-        case MonitorMode::WhenTrackActive:
-            // TODO: Check if this is the active track
-            return (currentState != ChannelState::Idle);
-        
-        default:
-            return false;
+        case MonitorMode::Off:            return false;
+        case MonitorMode::AlwaysOn:       return true;
+        case MonitorMode::WhileRecording: return cur == ChannelState::Recording
+                                              || cur == ChannelState::Overdubbing;
+        case MonitorMode::WhenTrackActive:return cur != ChannelState::Idle;
+        default:                          return false;
     }
 }
 
-//==============================================================================
-// Utility Methods
-//==============================================================================
-
-float Channel::dbToLinear(float db)
-{
-    return juce::Decibels::decibelsToGain(db);
-}
-
-float Channel::linearToDb(float linear)
-{
-    return juce::Decibels::gainToDecibels(linear);
-}
+float Channel::dbToLinear(float db)  { return juce::Decibels::decibelsToGain(db); }
+float Channel::linearToDb(float lin) { return juce::Decibels::gainToDecibels(lin); }

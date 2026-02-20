@@ -5,64 +5,81 @@
 
 /**
  * @file TransportComponent.h
- * @brief Global transport and loop controls
  *
- * Displays:
- * - Play/Stop button
- * - BPM control
- * - Beats per loop
- * - Quantization toggle
- * - Metronome enable toggle + output channel selector  ← NEW
- * - Loop length display
- * - CPU meter
+ * Metronom-Logik:
+ *   metronomeButton      – AN/AUS, gesperrt wenn Aufnahmen vorhanden
+ *   metronomeMuteButton  – Sound stumm, Timing bleibt (wie Channel-Mute)
+ *   metroOutputBox       – Ausgangskanal-Paar
+ *
+ * Reset Song:
+ *   resetSongButton      – AlertWindow → alle Channels clearen + Loop zurücksetzen
+ *
+ * FIX: refreshAfterAudioInit() muss nach initialiseAudio() aufgerufen werden,
+ *      damit metroOutputBox die tatsächliche Kanal-Anzahl kennt.
  */
-
-//==============================================================================
 class TransportComponent : public juce::Component,
                            private juce::Timer
 {
 public:
-    TransportComponent(AudioEngine& engine);
+    explicit TransportComponent(AudioEngine& engine);
     ~TransportComponent() override;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
 
+    /**
+     * @brief Nach AudioEngine::initialiseAudio() aufrufen.
+     * Aktualisiert metroOutputBox mit der tatsächlichen Ausgangskanal-Anzahl.
+     * Muss vom MainComponent nach erfolgreicher Audio-Initialisierung aufgerufen werden.
+     */
+    void refreshAfterAudioInit();
+
 private:
     AudioEngine& audioEngine;
 
-    // Transport controls
+    //==========================================================================
+    // Transport
     juce::TextButton playStopButton{"Play"};
 
-    // Loop controls
-    juce::Label  bpmLabel{"", "BPM:"};
-    juce::Slider bpmSlider;
-
-    juce::Label  beatsLabel{"", "Beats:"};
-    juce::Slider beatsSlider;
-
+    // Loop settings
+    juce::Label        bpmLabel   {"", "BPM:"};
+    juce::Slider       bpmSlider;
+    juce::Label        beatsLabel {"", "Beats:"};
+    juce::Slider       beatsSlider;
     juce::ToggleButton quantizeButton{"Quantize"};
 
-    // Metronome controls (NEW)
-    juce::ToggleButton metronomeButton{"Metronome"};
+    //==========================================================================
+    // Metronome
+    juce::ToggleButton metronomeButton    {"Metronome"};
+    juce::ToggleButton metronomeMuteButton{"Mute Click"};
+    juce::Label        metroOutLabel      {"", "Metro Out:"};
+    juce::ComboBox     metroOutputBox;
 
-    juce::Label    metroOutLabel{"", "Metro Out:"};
-    juce::ComboBox metroOutputBox;   // "Out 1/2", "Out 3/4", ...
+    //==========================================================================
+    // Reset Song
+    juce::TextButton resetSongButton{"Reset Song"};
 
+    //==========================================================================
     // Display
-    juce::Label loopLengthLabel{"", "Loop: 0.00s"};
-    juce::Label playheadLabel  {"", "Pos: 0.00s"};
+    juce::Label modeLabel      {"", "Mode: Free"};
+    juce::Label loopLengthLabel{"", "Loop: ---"};
+    juce::Label playheadLabel  {"", "Pos:  0.00s"};
     juce::Label cpuLabel       {"", "CPU: 0%"};
 
+    //==========================================================================
     void timerCallback() override;
+    void updateDisplay();
+    void updateMetronomeButtonStates();
+
     void playStopClicked();
     void bpmChanged();
     void beatsChanged();
     void quantizeChanged();
-    void metronomeChanged();        // NEW
-    void metroOutputChanged();      // NEW
-    void updateDisplay();
-    void populateMetroOutputBox();  // NEW
+    void metronomeChanged();
+    void metronomeMuteChanged();
+    void metroOutputChanged();
+    void resetSongClicked();
+    void populateMetroOutputBox();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportComponent)
 };

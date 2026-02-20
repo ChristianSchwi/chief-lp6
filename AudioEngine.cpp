@@ -4,30 +4,24 @@
 #include "PluginHostWrapper.h"
 
 //==============================================================================
+// Constructor / Destructor
+//==============================================================================
+
 AudioEngine::AudioEngine()
 {
     loopEngine       = std::make_unique<LoopEngine>();
+    metronome        = std::make_unique<Metronome>();
     pluginHost       = std::make_unique<PluginHostWrapper>();
     midiLearnManager = std::make_unique<MidiLearnManager>(*this);
-    metronome = std::make_unique<Metronome>();
 
-
-    // Create 6 audio channels (default to Audio type)
     for (int i = 0; i < 6; ++i)
-    {
         channels[i] = std::make_unique<AudioChannel>(i);
-    }
-    
-    // Set up audio device manager
+
     deviceManager.addAudioCallback(this);
-    
-    // Note: Plugin scanning removed from constructor to avoid blocking
-    // Call audioEngine->getPluginHost().scanForPlugins() manually when ready
 }
 
 AudioEngine::~AudioEngine()
 {
-    // Close all open MIDI inputs
     const auto midiInputs = juce::MidiInput::getAvailableDevices();
     for (const auto& device : midiInputs)
         deviceManager.setMidiInputDeviceEnabled(device.identifier, false);
@@ -42,31 +36,33 @@ AudioEngine::~AudioEngine()
 
 void AudioEngine::openMidiInputs()
 {
-    // Enable all available MIDI inputs and register this as callback
     const auto midiInputs = juce::MidiInput::getAvailableDevices();
-
     for (const auto& device : midiInputs)
     {
         if (!deviceManager.isMidiInputDeviceEnabled(device.identifier))
             deviceManager.setMidiInputDeviceEnabled(device.identifier, true);
 
         deviceManager.addMidiInputDeviceCallback(device.identifier, this);
-        DBG("MIDI Input geöffnet: " + device.name);
+        DBG("MIDI Input opened: " + device.name);
     }
-
-    DBG("MIDI Inputs: " + juce::String(midiInputs.size()) + " Gerät(e) gefunden");
+    DBG("MIDI: " + juce::String(midiInputs.size()) + " device(s) found");
 }
 
 void AudioEngine::handleIncomingMidiMessage(juce::MidiInput* /*source*/,
                                              const juce::MidiMessage& message)
 {
-    // Läuft auf dem MIDI-Thread — nur lock-free Operationen!
+    // MIDI thread — lock-free only!
+
+    // 1. MidiLearnManager (für MIDI-Mapping)
     if (midiLearnManager)
         midiLearnManager->postMidiMessage(message);
+
+    // 2. Collector → Audio-Thread liest ihn im nächsten Block aus
+    midiCollector.addMessageToQueue(message);
 }
 
 //==============================================================================
-// Audio Device Initialization
+// Initialization
 //==============================================================================
 
 juce::String AudioEngine::initialiseAudio(int inputChannels,
@@ -74,186 +70,150 @@ juce::String AudioEngine::initialiseAudio(int inputChannels,
                                           double sampleRate,
                                           int bufferSize)
 {
-    // Create setup for audio device
     juce::AudioDeviceManager::AudioDeviceSetup setup;
     deviceManager.getAudioDeviceSetup(setup);
-    
-    // Configure inputs/outputs
-    setup.inputChannels.setRange(0, inputChannels, true);
+
+    setup.inputChannels .setRange(0, inputChannels,  true);
     setup.outputChannels.setRange(0, outputChannels, true);
-    
-    if (sampleRate > 0.0)
-        setup.sampleRate = sampleRate;
-    
-    if (bufferSize > 0)
-        setup.bufferSize = bufferSize;
-    
-    // Initialize device
-    juce::String error = deviceManager.initialise(inputChannels,
-                                                  outputChannels,
-                                                  nullptr,
-                                                  true,
-                                                  juce::String(),
-                                                  &setup);
-    
+
+    if (sampleRate > 0.0) setup.sampleRate = sampleRate;
+    if (bufferSize  > 0)  setup.bufferSize  = bufferSize;
+
+    const juce::String error = deviceManager.initialise(inputChannels,
+                                                        outputChannels,
+                                                        nullptr,
+                                                        true,
+                                                        juce::String(),
+                                                        &setup);
     if (error.isEmpty())
     {
         isInitialised.store(true, std::memory_order_release);
         openMidiInputs();
-        DBG("Audio engine initialized successfully");
-        DBG("Sample Rate: " + juce::String(currentSampleRate));
-        DBG("Buffer Size: " + juce::String(currentBufferSize));
-        DBG("Input Channels: " + juce::String(numInputChannels));
-        DBG("Output Channels: " + juce::String(numOutputChannels));
+        DBG("Audio engine initialized: " +
+            juce::String(currentSampleRate) + " Hz, " +
+            juce::String(currentBufferSize) + " samples, " +
+            juce::String(numInputChannels) + " in / " +
+            juce::String(numOutputChannels) + " out");
     }
     else
     {
-        DBG("Audio engine initialization failed: " + error);
+        DBG("Audio engine init failed: " + error);
     }
-    
+
     return error;
 }
 
 //==============================================================================
-// AudioIODeviceCallback Implementation
+// AudioIODeviceCallback
 //==============================================================================
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
-    if (device == nullptr)
-        return;
-    
-    // Store device parameters
-    currentSampleRate = device->getCurrentSampleRate();
-    currentBufferSize = device->getCurrentBufferSizeSamples();
-    numInputChannels = device->getActiveInputChannels().countNumberOfSetBits();
-    numOutputChannels = device->getActiveOutputChannels().countNumberOfSetBits();
-    
-    // Configure loop engine
+    if (!device) return;
+
+    currentSampleRate  = device->getCurrentSampleRate();
+    currentBufferSize  = device->getCurrentBufferSizeSamples();
+    numInputChannels   = device->getActiveInputChannels() .countNumberOfSetBits();
+    numOutputChannels  = device->getActiveOutputChannels().countNumberOfSetBits();
+
+    // Loop engine
     loopEngine->setSampleRate(currentSampleRate);
 
+    // Metronome — prepare (do NOT re-create here, that would reset config)
     metronome->setBPM(loopEngine->getBPM());
     metronome->prepareToPlay(currentSampleRate);
 
-    
-    // Pre-allocate working buffers
-    inputBuffer.setSize(numInputChannels, currentBufferSize * 2);  // Double for safety
-    outputBuffer.setSize(numOutputChannels, currentBufferSize * 2);
-    
-    // Prepare all channels
-    // Max loop length: 10 minutes @ 96kHz stereo = 57,600,000 samples
-    const juce::int64 maxLoopLengthSamples = static_cast<juce::int64>(600.0 * currentSampleRate);
-    
-    for (auto& channel : channels)
-    {
-        if (channel)
-        {
-            channel->prepareToPlay(currentSampleRate, currentBufferSize, maxLoopLengthSamples);
-        }
-    }
+    // MIDI collector — must be reset when sample rate changes
+    midiCollector.reset(currentSampleRate);
 
-    DBG("Audio device about to start:");
-    DBG("  Sample Rate: " + juce::String(currentSampleRate) + " Hz");
-    DBG("  Buffer Size: " + juce::String(currentBufferSize) + " samples");
-    DBG("  Input Channels: " + juce::String(numInputChannels));
-    DBG("  Output Channels: " + juce::String(numOutputChannels));
-    DBG("  Latency: " + juce::String(currentBufferSize / currentSampleRate * 1000.0, 2) + " ms");
+    // Working buffers
+    inputBuffer .setSize(numInputChannels,  currentBufferSize * 2);
+    outputBuffer.setSize(numOutputChannels, currentBufferSize * 2);
+
+    // Prepare channels (max loop = 10 min)
+    const juce::int64 maxLoopSamples = static_cast<juce::int64>(600.0 * currentSampleRate);
+    for (auto& ch : channels)
+        if (ch) ch->prepareToPlay(currentSampleRate, currentBufferSize, maxLoopSamples);
+
+    DBG("Audio device ready: " +
+        juce::String(currentSampleRate) + " Hz, " +
+        juce::String(currentBufferSize) + " samples, " +
+        juce::String(currentBufferSize / currentSampleRate * 1000.0, 2) + " ms latency");
 }
 
 void AudioEngine::audioDeviceStopped()
 {
-    DBG("Audio device stopped");
-    
-    // Reset state
     isPlayingFlag.store(false, std::memory_order_release);
-    
-    // Release channel resources
-    for (auto& channel : channels)
-    {
-        if (channel)
-        {
-            channel->releaseResources();
-        }
-    }
-    
-    // Clear working buffers
-    inputBuffer.clear();
+    for (auto& ch : channels)
+        if (ch) ch->releaseResources();
+    inputBuffer .clear();
     outputBuffer.clear();
+    DBG("Audio device stopped");
 }
 
-void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
+void AudioEngine::audioDeviceIOCallbackWithContext(
+    const float* const* inputChannelData,
     int numInputChannels,
     float* const* outputChannelData,
     int numOutputChannels,
     int numSamples,
-    const juce::AudioIODeviceCallbackContext& context)
-
+    const juce::AudioIODeviceCallbackContext& /*context*/)
 {
-    //==============================================================================
-    // REAL-TIME AUDIO THREAD - NO ALLOCATIONS, NO LOCKS, NO BLOCKING
-    //==============================================================================
-    
-    // Safety check
+    //==========================================================================
+    // REAL-TIME AUDIO THREAD — NO ALLOCATIONS, NO LOCKS, NO BLOCKING
+    //==========================================================================
+
     if (numSamples <= 0 || !isInitialised.load(std::memory_order_relaxed))
     {
         clearOutputBuffer(outputChannelData, numOutputChannels, numSamples);
         return;
     }
-    
-    //==============================================================================
-    // 1. PROCESS COMMANDS FROM QUEUE
-    //==============================================================================
+
+    //--- 1. PROCESS COMMANDS ---------------------------------------------------
     commandQueue.processCommands([this](const Command& cmd) {
         processCommand(cmd);
     });
-    
-    //==============================================================================
-    // 2. CLEAR OUTPUT BUFFER
-    //==============================================================================
+
+    //--- 2. CLEAR OUTPUT -------------------------------------------------------
     clearOutputBuffer(outputChannelData, numOutputChannels, numSamples);
-    
-    //==============================================================================
-    // 3. ADVANCE GLOBAL PLAYHEAD
-    //==============================================================================
+
+    //--- 3. ADVANCE PLAYHEAD ---------------------------------------------------
     const bool playing = isPlayingFlag.load(std::memory_order_relaxed);
     loopEngine->processBlock(numSamples, playing);
-    
-    //==============================================================================
-    // 4. PROCESS EACH CHANNEL
-    //==============================================================================
+
+    //--- 4. COLLECT MIDI -------------------------------------------------------
+    // Thread-safe: MIDI thread writes via addMessageToQueue(),
+    // audio thread reads here via removeNextBlockOfMessages()
+    juce::MidiBuffer midiBuffer;
+    midiCollector.removeNextBlockOfMessages(midiBuffer, numSamples);
+
+    //--- 5. PROCESS CHANNELS ---------------------------------------------------
     const juce::int64 playheadPos = loopEngine->getCurrentPlayhead();
-    const juce::int64 loopLen = loopEngine->getLoopLength();
-    
-    // Empty MIDI buffer for now (Phase 6 will add MIDI processor)
-    juce::MidiBuffer emptyMidi;
-    
+    const juce::int64 loopLen     = loopEngine->getLoopLength();
+
     for (auto& channel : channels)
     {
         if (channel)
         {
             channel->processBlock(inputChannelData,
-                                outputChannelData,
-                                emptyMidi,
-                                numSamples,
-                                playheadPos,
-                                loopLen,
-                                numInputChannels,
-                                numOutputChannels);
+                                  outputChannelData,
+                                  midiBuffer,
+                                  numSamples,
+                                  playheadPos,
+                                  loopLen,
+                                  numInputChannels,
+                                  numOutputChannels);
         }
     }
-    
-    //==============================================================================
-    // 5. GENERATE METRONOME (if enabled)
-    //==============================================================================
+
+    //--- 6. METRONOME ----------------------------------------------------------
     metronome->processBlock(outputChannelData,
-        numOutputChannels,
-        numSamples,
-        playheadPos,
-        playing);
-    
-    //==============================================================================
-    // UPDATE DIAGNOSTICS
-    //==============================================================================
+                            numOutputChannels,
+                            numSamples,
+                            playheadPos,
+                            playing);
+
+    //--- DIAGNOSTICS -----------------------------------------------------------
     totalSamplesProcessed.fetch_add(numSamples, std::memory_order_relaxed);
 }
 
@@ -263,15 +223,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
 
 void AudioEngine::processCommand(const Command& cmd)
 {
-    // Route command to appropriate handler
     if (cmd.channelIndex >= 0 && cmd.channelIndex < 6)
-    {
         processChannelCommand(cmd);
-    }
     else
-    {
         processGlobalCommand(cmd);
-    }
 }
 
 void AudioEngine::processGlobalCommand(const Command& cmd)
@@ -282,53 +237,63 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
         {
             const double bpm = static_cast<double>(cmd.floatValue);
             loopEngine->setBPM(bpm);
-            metronome->setBPM(bpm);  // ← hinzufügen
+            metronome->setBPM(bpm);
+            // Wenn Metronom aktiv: Loop-Länge sofort aus neuem BPM berechnen
+            if (metronome->getEnabled())
+                loopEngine->calculateLoopLengthFromBPM();
             break;
         }
-        
+
         case CommandType::SetBeatsPerLoop:
         {
             loopEngine->setBeatsPerLoop(cmd.intValue1);
-            loopEngine->calculateLoopLengthFromBPM();
+            // Nur neu berechnen wenn Metronom aktiv (sonst freier Modus)
+            if (metronome->getEnabled())
+                loopEngine->calculateLoopLengthFromBPM();
             break;
         }
-        
+
         case CommandType::SetLoopLength:
         {
-            const juce::int64 length = cmd.getLoopLength();
-            loopEngine->setLoopLength(length);
+            loopEngine->setLoopLength(cmd.getLoopLength());
             break;
         }
-        
+
         case CommandType::SetQuantization:
         {
             loopEngine->setQuantizationEnabled(cmd.boolValue);
             break;
         }
-        
+
         case CommandType::ResetPlayhead:
         {
             loopEngine->resetPlayhead();
             break;
         }
-        
+
         case CommandType::SetGlobalOverdubMode:
         {
             overdubMode.store(cmd.boolValue, std::memory_order_release);
             break;
         }
-        
-        case CommandType::EmergencyStop:
-        {
-            isPlayingFlag.store(false, std::memory_order_release);
-            loopEngine->resetPlayhead();
-            // TODO: Stop all channels
-            break;
-        }
 
-        case CommandType::SetMetronomeEnabled:
+        case CommandType::ChangeActiveChannel:
         {
-            metronome->setEnabled(cmd.boolValue);
+            // intValue1: +1 = next, -1 = prev, 0-5 = direkt
+            if (cmd.intValue1 == 1)
+            {
+                const int cur = activeChannelIndex.load(std::memory_order_relaxed);
+                activeChannelIndex.store((cur + 1) % 6, std::memory_order_release);
+            }
+            else if (cmd.intValue1 == -1)
+            {
+                const int cur = activeChannelIndex.load(std::memory_order_relaxed);
+                activeChannelIndex.store((cur + 5) % 6, std::memory_order_release);
+            }
+            else if (cmd.intValue1 >= 0 && cmd.intValue1 < 6)
+            {
+                activeChannelIndex.store(cmd.intValue1, std::memory_order_release);
+            }
             break;
         }
 
@@ -337,32 +302,57 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
             metronome->setOutputChannels(cmd.intValue1, cmd.intValue2);
             break;
         }
-        
+
+        case CommandType::SetMetronomeMute:
+        {
+            metronome->setMuted(cmd.boolValue);
+            break;
+        }
+
+        case CommandType::ResetSong:
+        {
+            for (auto& ch : channels)
+                if (ch) ch->clearLoop();
+
+            loopEngine->setLoopLength(0);
+            loopEngine->resetPlayhead();
+
+            if (metronome->getEnabled())
+                loopEngine->calculateLoopLengthFromBPM();
+
+            isPlayingFlag.store(false, std::memory_order_release);
+            DBG("Song reset: all channels cleared");
+            break;
+        }
+
+        case CommandType::EmergencyStop:
+        {
+            isPlayingFlag.store(false, std::memory_order_release);
+            loopEngine->resetPlayhead();
+            for (auto& ch : channels)
+                if (ch) ch->stopPlayback();
+            break;
+        }
+
         default:
-            // Unknown command type
-            DBG("Unknown global command type: " + juce::String(static_cast<int>(cmd.type)));
+            DBG("Unknown global command: " + juce::String(static_cast<int>(cmd.type)));
             break;
     }
 }
 
 void AudioEngine::processChannelCommand(const Command& cmd)
 {
-    // Validate channel index
-    if (cmd.channelIndex < 0 || cmd.channelIndex >= 6)
-        return;
-    
+    if (cmd.channelIndex < 0 || cmd.channelIndex >= 6) return;
+
     Channel* channel = channels[cmd.channelIndex].get();
-    if (!channel)
-        return;
-    
+    if (!channel) return;
+
     switch (cmd.type)
     {
-        
         case CommandType::StartRecord:
         {
-            // Wenn noch keine Loop-Länge etabliert: Playhead auf 0 zurücksetzen,
-            // damit die Aufnahme sauber bei Sample 0 beginnt.
-            if (!loopEngine->hasLoopLength())
+            // Freier Modus + noch keine Loop-Länge: Playhead auf 0
+            if (!metronome->getEnabled() && loopEngine->getLoopLength() == 0)
                 loopEngine->resetPlayhead();
 
             channel->startRecording(false);
@@ -371,137 +361,113 @@ void AudioEngine::processChannelCommand(const Command& cmd)
 
         case CommandType::StopRecord:
         {
-            // Erste Aufnahme beendet → globale Loop-Länge aus Playhead-Position ableiten
-            // (Spec Abschnitt 2: "Erste beendete Aufnahme bestimmt die globale Loop-Länge")
-            if (!loopEngine->hasLoopLength())
+            // Freier Modus: erste beendete Aufnahme setzt globale Loop-Länge
+            if (!metronome->getEnabled() && loopEngine->getLoopLength() == 0)
             {
-                const juce::int64 recordedSamples = loopEngine->getCurrentPlayhead();
-
-                if (recordedSamples > 0)
+                const juce::int64 recorded = loopEngine->getCurrentPlayhead();
+                if (recorded > 0)
                 {
-                    loopEngine->setLoopLength(recordedSamples);
-
-                    DBG("Loop length set from first recording: " +
-                        juce::String(recordedSamples) + " samples (" +
-                        juce::String(static_cast<double>(recordedSamples) /
-                            currentSampleRate, 2) + "s)");
-                }
-                else
-                {
-                    DBG("WARNING: StopRecord called but playhead is 0 — loop length not set");
+                    loopEngine->setLoopLength(recorded);
+                    DBG("Loop length from first recording: " +
+                        juce::String(recorded) + " samples (" +
+                        juce::String(static_cast<double>(recorded) / currentSampleRate, 2) + "s)");
                 }
             }
-
-            // Playhead auf 0: Playback startet direkt am Loop-Anfang
             loopEngine->resetPlayhead();
-
             channel->stopRecording();
             break;
         }
 
-        
         case CommandType::StartPlayback:
         {
             channel->startPlayback();
             break;
         }
-        
+
         case CommandType::StopPlayback:
         {
             channel->stopPlayback();
             break;
         }
-        
+
         case CommandType::StartOverdub:
         {
-            channel->startRecording(true);  // true = overdub mode
+            channel->startRecording(true);
             break;
         }
-        
+
         case CommandType::StopOverdub:
         {
             channel->stopRecording();
             break;
         }
-        
+
         case CommandType::SetGain:
         {
             channel->setGainDb(cmd.floatValue);
             break;
         }
-        
+
         case CommandType::SetMonitorMode:
         {
             channel->setMonitorMode(static_cast<MonitorMode>(cmd.intValue1));
             break;
         }
-        
+
         case CommandType::SetMute:
         {
             channel->setMuted(cmd.boolValue);
             break;
         }
-        
+
         case CommandType::SetSolo:
         {
             channel->setSolo(cmd.boolValue);
             break;
         }
-        
+
         case CommandType::SetInputRouting:
         case CommandType::SetOutputRouting:
         {
             channel->setRouting(cmd.data.routing);
             break;
         }
-        
+
         case CommandType::SetMIDIChannelFilter:
         {
-            // Only for VSTi channels
             if (channel->getType() == ChannelType::VSTi)
-            {
-                VSTiChannel* vstiChannel = static_cast<VSTiChannel*>(channel);
-                vstiChannel->setMIDIChannelFilter(cmd.intValue1);
-            }
+                static_cast<VSTiChannel*>(channel)->setMIDIChannelFilter(cmd.intValue1);
             break;
         }
-        
+
         case CommandType::SetPluginBypass:
         {
             channel->setPluginBypassed(cmd.intValue1, cmd.boolValue);
             break;
         }
-        
+
         case CommandType::LoadPlugin:
-        {
-            // Note: Actual loading happens in message thread via loadPluginAsync()
-            // This command can trigger state updates if needed
+            // Loading happens on message thread via loadPluginAsync()
             break;
-        }
-        
+
         case CommandType::UnloadPlugin:
         {
             const int slot = cmd.intValue1;
-            
             if (slot == -1 && channel->getType() == ChannelType::VSTi)
-            {
-                auto* vstiChannel = static_cast<VSTiChannel*>(channel);
-                vstiChannel->removeVSTi();
-            }
+                static_cast<VSTiChannel*>(channel)->removeVSTi();
             else if (slot >= 0 && slot < 3)
-            {
                 channel->removePlugin(slot);
-            }
             break;
         }
-        
+
         case CommandType::ClearChannel:
         {
             channel->clearLoop();
             break;
         }
-        
+
         default:
+            DBG("Unknown channel command: " + juce::String(static_cast<int>(cmd.type)));
             break;
     }
 }
@@ -512,35 +478,24 @@ void AudioEngine::processChannelCommand(const Command& cmd)
 
 bool AudioEngine::sendCommand(const Command& cmd)
 {
-    bool success = commandQueue.pushCommand(cmd);
-    
-    if (!success)
+    if (!commandQueue.pushCommand(cmd))
     {
-        DBG("WARNING: Command queue full! Command dropped.");
-        // Could trigger a warning to GUI here via AsyncUpdater
+        DBG("WARNING: Command queue full — command dropped.");
+        return false;
     }
-    
-    return success;
+    return true;
 }
 
 void AudioEngine::setPlaying(bool shouldPlay)
 {
     isPlayingFlag.store(shouldPlay, std::memory_order_release);
-    
-    if (shouldPlay)
-    {
-        DBG("Playback started");
-    }
-    else
-    {
-        DBG("Playback stopped");
-    }
+  //  DBG(shouldPlay ? "Playback started" : "Playback stopped");
 }
 
 void AudioEngine::setOverdubMode(bool enabled)
 {
     Command cmd;
-    cmd.type = CommandType::SetGlobalOverdubMode;
+    cmd.type      = CommandType::SetGlobalOverdubMode;
     cmd.boolValue = enabled;
     sendCommand(cmd);
 }
@@ -551,18 +506,36 @@ void AudioEngine::emergencyStop()
 }
 
 //==============================================================================
-// Utility Methods
+// Active Channel Navigation
 //==============================================================================
 
-void AudioEngine::clearOutputBuffer(float* const* outputChannelData, int numChannels, int numSamples)
+void AudioEngine::setActiveChannel(int index)
+{
+    activeChannelIndex.store(juce::jlimit(0, 5, index), std::memory_order_release);
+}
+
+void AudioEngine::nextChannel()
+{
+    const int cur = activeChannelIndex.load(std::memory_order_relaxed);
+    activeChannelIndex.store((cur + 1) % 6, std::memory_order_release);
+}
+
+void AudioEngine::prevChannel()
+{
+    const int cur = activeChannelIndex.load(std::memory_order_relaxed);
+    activeChannelIndex.store((cur + 5) % 6, std::memory_order_release);
+}
+
+//==============================================================================
+// Utility
+//==============================================================================
+
+void AudioEngine::clearOutputBuffer(float* const* outputChannelData,
+                                    int numChannels, int numSamples)
 {
     for (int ch = 0; ch < numChannels; ++ch)
-    {
-        if (outputChannelData[ch] != nullptr)
-        {
+        if (outputChannelData[ch])
             juce::FloatVectorOperations::clear(outputChannelData[ch], numSamples);
-        }
-    }
 }
 
 //==============================================================================
@@ -571,165 +544,175 @@ void AudioEngine::clearOutputBuffer(float* const* outputChannelData, int numChan
 
 Channel* AudioEngine::getChannel(int index)
 {
-    if (index >= 0 && index < 6)
-        return channels[index].get();
-    
-    return nullptr;
+    return (index >= 0 && index < 6) ? channels[index].get() : nullptr;
 }
 
 void AudioEngine::setChannelType(int index, ChannelType type)
 {
-    if (index < 0 || index >= 6)
-        return;
-    
-    // Get current type
-    if (channels[index] && channels[index]->getType() == type)
-        return;  // Already correct type
-    
-    // Stop playback first (safety)
-    bool wasPlaying = isPlaying();
-    if (wasPlaying)
-        setPlaying(false);
-    
-    // Create new channel of appropriate type
-    if (type == ChannelType::Audio)
-    {
-        channels[index] = std::make_unique<AudioChannel>(index);
-    }
-    else
-    {
-        channels[index] = std::make_unique<VSTiChannel>(index);
-    }
-    
-    // Prepare if device is active
+    if (index < 0 || index >= 6) return;
+    if (channels[index] && channels[index]->getType() == type) return;
+
+    const bool wasPlaying = isPlaying();
+    if (wasPlaying) setPlaying(false);
+
+    channels[index] = (type == ChannelType::Audio)
+                      ? std::unique_ptr<Channel>(std::make_unique<AudioChannel>(index))
+                      : std::unique_ptr<Channel>(std::make_unique<VSTiChannel>(index));
+
     if (isInitialised.load(std::memory_order_relaxed))
     {
-        const juce::int64 maxLoopLengthSamples = static_cast<juce::int64>(600.0 * currentSampleRate);
-        channels[index]->prepareToPlay(currentSampleRate, currentBufferSize, maxLoopLengthSamples);
+        const juce::int64 maxSamples = static_cast<juce::int64>(600.0 * currentSampleRate);
+        channels[index]->prepareToPlay(currentSampleRate, currentBufferSize, maxSamples);
     }
-    
-    // Resume playback if it was active
-    if (wasPlaying)
-        setPlaying(true);
-    
-    DBG("Channel " + juce::String(index) + " type changed to " + 
+
+    if (wasPlaying) setPlaying(true);
+
+    DBG("Channel " + juce::String(index) + " → " +
         (type == ChannelType::Audio ? "Audio" : "VSTi"));
 }
 
 ChannelType AudioEngine::getChannelType(int index) const
 {
-    if (index >= 0 && index < 6 && channels[index])
-        return channels[index]->getType();
-    
-    return ChannelType::Audio;  // Default
+    return (index >= 0 && index < 6 && channels[index])
+           ? channels[index]->getType()
+           : ChannelType::Audio;
 }
 
 //==============================================================================
 // Plugin Management (Message Thread)
 //==============================================================================
 
-void AudioEngine::loadPluginAsync(int channelIndex, int slotIndex, const juce::String& pluginIdentifier)
+void AudioEngine::loadPluginAsync(int channelIndex,
+                                   int slotIndex,
+                                   const juce::String& pluginIdentifier,
+                                   const juce::String& stateBase64)
 {
     if (channelIndex < 0 || channelIndex >= 6)
     {
-        DBG("Invalid channel index: " + juce::String(channelIndex));
+        DBG("loadPluginAsync: invalid channel " + juce::String(channelIndex));
         return;
     }
-    
     if (slotIndex < -1 || slotIndex >= 3)
     {
-        DBG("Invalid slot index: " + juce::String(slotIndex));
+        DBG("loadPluginAsync: invalid slot " + juce::String(slotIndex));
         return;
     }
-    
-    // Find plugin description
+
     auto description = pluginHost->findPluginByIdentifier(pluginIdentifier);
-    
     if (description.name.isEmpty())
     {
-        DBG("Plugin not found: " + pluginIdentifier);
+        DBG("loadPluginAsync: plugin not found: " + pluginIdentifier);
         return;
     }
-    
-    DBG("Loading plugin: " + description.name + " into channel " + 
-        juce::String(channelIndex) + ", slot " + juce::String(slotIndex));
-    
-    // Load plugin asynchronously
+
+    DBG("loadPluginAsync: " + description.name +
+        " → ch " + juce::String(channelIndex) +
+        " slot " + juce::String(slotIndex) +
+        (stateBase64.isNotEmpty() ? " (with saved state)" : ""));
+
     pluginHost->loadPluginAsync(
         description,
         currentSampleRate,
         currentBufferSize,
-        [this, channelIndex, slotIndex](std::unique_ptr<juce::AudioPluginInstance> plugin,
-                                        const juce::String& error)
+        [this, channelIndex, slotIndex, stateBase64]
+        (std::unique_ptr<juce::AudioPluginInstance> plugin, const juce::String& error)
         {
             if (!plugin)
             {
-                DBG("Failed to load plugin: " + error);
+                DBG("loadPluginAsync: failed — " + error);
                 return;
             }
-            
-            // Get the channel
+
+            // Restore saved state BEFORE handing off to channel
+            if (stateBase64.isNotEmpty())
+            {
+                const auto stateBlock = PluginHostWrapper::base64ToMemoryBlock(stateBase64);
+                if (!pluginHost->loadPluginState(plugin.get(), stateBlock))
+                    DBG("loadPluginAsync: state restore failed — ch " +
+                        juce::String(channelIndex) + " slot " + juce::String(slotIndex));
+            }
+
             auto* channel = channels[channelIndex].get();
             if (!channel)
+            {
+                DBG("loadPluginAsync: channel " + juce::String(channelIndex) +
+                    " no longer exists");
                 return;
-            
+            }
+
             if (slotIndex == -1)
             {
-                // Load as VSTi (only for VSTi channels)
                 if (channel->getType() == ChannelType::VSTi)
                 {
-                    auto* vstiChannel = static_cast<VSTiChannel*>(channel);
-                    vstiChannel->setVSTi(std::move(plugin));
-                    DBG("VSTi loaded into channel " + juce::String(channelIndex));
+                    static_cast<VSTiChannel*>(channel)->setVSTi(std::move(plugin));
+                    DBG("VSTi loaded → ch " + juce::String(channelIndex));
                 }
                 else
                 {
-                    DBG("Cannot load VSTi into Audio channel");
+                    DBG("loadPluginAsync: cannot load VSTi into Audio channel");
                 }
             }
             else
             {
-                // Load as FX
                 channel->addPlugin(slotIndex, std::move(plugin));
-                DBG("FX loaded into channel " + juce::String(channelIndex) + 
-                    ", slot " + juce::String(slotIndex));
+                DBG("FX loaded → ch " + juce::String(channelIndex) +
+                    " slot " + juce::String(slotIndex));
             }
         });
 }
 
 void AudioEngine::removePlugin(int channelIndex, int slotIndex)
 {
-    if (channelIndex < 0 || channelIndex >= 6)
-        return;
-    
+    if (channelIndex < 0 || channelIndex >= 6) return;
     auto* channel = channels[channelIndex].get();
-    if (!channel)
-        return;
-    
-    if (slotIndex == -1)
+    if (!channel) return;
+
+    if (slotIndex == -1 && channel->getType() == ChannelType::VSTi)
     {
-        // Remove VSTi
-        if (channel->getType() == ChannelType::VSTi)
-        {
-            auto* vstiChannel = static_cast<VSTiChannel*>(channel);
-            vstiChannel->removeVSTi();
-            DBG("VSTi removed from channel " + juce::String(channelIndex));
-        }
+        static_cast<VSTiChannel*>(channel)->removeVSTi();
+        DBG("VSTi removed from ch " + juce::String(channelIndex));
     }
     else if (slotIndex >= 0 && slotIndex < 3)
     {
-        // Remove FX
         channel->removePlugin(slotIndex);
-        DBG("FX removed from channel " + juce::String(channelIndex) + 
-            ", slot " + juce::String(slotIndex));
+        DBG("FX removed from ch " + juce::String(channelIndex) +
+            " slot " + juce::String(slotIndex));
     }
 }
 
+//==============================================================================
+// Metronome (Message Thread)
+//==============================================================================
+
 void AudioEngine::setMetronomeEnabled(bool enabled)
 {
+    // Geblockt wenn Aufnahmen vorhanden
+    if (hasAnyRecordings())
+    {
+        DBG("Metronome toggle blocked: recordings exist");
+        return;
+    }
+
     metronome->setEnabled(enabled);
     metronome->setBPM(loopEngine->getBPM());
+
+    if (enabled)
+        loopEngine->calculateLoopLengthFromBPM();   // AN  → Loop-Länge aus BPM
+    else
+        loopEngine->setLoopLength(0);               // AUS → freier Modus
+
     DBG("Metronome " + juce::String(enabled ? "enabled" : "disabled"));
+}
+
+void AudioEngine::setMetronomeMuted(bool muted)
+{
+    // Direkt per Atomic + Command für Audio-Thread
+    metronome->setMuted(muted);
+
+    Command cmd;
+    cmd.type      = CommandType::SetMetronomeMute;
+    cmd.boolValue = muted;
+    sendCommand(cmd);
 }
 
 void AudioEngine::setMetronomeOutput(int leftChannel, int rightChannel)
@@ -737,11 +720,25 @@ void AudioEngine::setMetronomeOutput(int leftChannel, int rightChannel)
     metronome->setOutputChannels(leftChannel, rightChannel);
 
     Command cmd;
-    cmd.type = CommandType::SetMetronomeOutput;
+    cmd.type      = CommandType::SetMetronomeOutput;
     cmd.intValue1 = leftChannel;
     cmd.intValue2 = rightChannel;
     sendCommand(cmd);
+}
 
-    DBG("Metronome output: " + juce::String(leftChannel) +
-        " / " + juce::String(rightChannel));
+//==============================================================================
+// Song Reset (Message Thread)
+//==============================================================================
+
+bool AudioEngine::hasAnyRecordings() const
+{
+    for (const auto& ch : channels)
+        if (ch && ch->hasLoop())
+            return true;
+    return false;
+}
+
+void AudioEngine::resetSong()
+{
+    sendCommand(Command::resetSong());
 }

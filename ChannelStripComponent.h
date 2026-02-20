@@ -2,25 +2,19 @@
 
 #include <JuceHeader.h>
 #include "AudioEngine.h"
-#include "Channel.h"
-#include "RoutingComponent.h"
-#include "MidiLearnManager.h"
-#include "PluginManagerComponent.h"
 
 /**
  * @file ChannelStripComponent.h
- * @brief GUI component for a single channel
+ * @brief Single channel strip UI
  *
- * Main button behaviour (Spec Abschnitt 5):
- *   Loop leer              → press starts Recording
- *   Loop vorhanden, idle   → press starts Playback
- *   Loop vorhanden, playing→ press stops Playback
- *   Global overdub active  → press toggles Overdub on this channel
+ * Single context-aware main button (Spec Abschnitt 5):
+ *   Priority: Overdub mode > Empty > Has loop (idle) > Playing > Recording
  *
- * Secondary buttons: CLR, I/O, FX
+ * Active Channel Highlight:
+ *   When this strip's index == audioEngine.getActiveChannel(),
+ *   a coloured border is drawn around the entire strip.
+ *   Clicking anywhere on the strip sets it as the active channel.
  */
-
-//==============================================================================
 class ChannelStripComponent : public juce::Component,
                               private juce::Timer
 {
@@ -30,69 +24,45 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
-
-    void updateFromChannel();
+    void mouseDown(const juce::MouseEvent& e) override;
 
 private:
     AudioEngine& audioEngine;
-    int          channelIdx;
+    const int    channelIndex;
 
     //==========================================================================
-    // UI Components
+    // Main context-aware button
+    juce::TextButton mainButton;
 
-    // Channel number + state
-    juce::Label channelLabel;
-    juce::Label stateLabel;
+    // Secondary buttons
+    juce::TextButton clrButton   {"CLR"};
+    juce::TextButton ioButton    {"I/O"};
+    juce::TextButton fxButton    {"FX"};
 
-    // ---- Main button (context-sensitive) ----
-    juce::TextButton mainButton{"REC"};
+    // Controls
+    juce::Slider     gainSlider;
+    juce::TextButton muteButton  {"M"};
+    juce::TextButton soloButton  {"S"};
 
-    // ---- Secondary buttons ----
-    juce::TextButton clearButton  {"CLR"};
-    juce::TextButton routingButton{"I/O"};
-    juce::TextButton fxButton     {"FX"};
-
-    // ---- Gain ----
-    juce::Label  gainLabel;
-    juce::Slider gainSlider;
-
-    // ---- Mute / Solo ----
-    juce::ToggleButton muteButton{"M"};
-    juce::ToggleButton soloButton{"S"};
-
-    // ---- Monitor mode ----
-    juce::ComboBox monitorModeBox;
-
-    // ---- Plugin strip (embedded) ----
-    PluginManagerComponent pluginStrip;
+    // Display
+    juce::Label      channelLabel;
+    juce::Label      stateLabel;
 
     //==========================================================================
-    // Cached state (updated by timer on message thread)
-    ChannelState currentState {ChannelState::Idle};
-    bool         hasLoop      {false};
-
-    //==========================================================================
-    // Timer
     void timerCallback() override;
+    void updateMainButton();
 
-    //==========================================================================
-    // Main button logic
     void mainButtonClicked();
-    void updateMainButton();   // Refreshes label + colour to reflect current context
-
-    //==========================================================================
-    // Other handlers
-    void clearClicked();
-    void gainChanged();
-    void monitorModeChanged();
+    void clrButtonClicked();
     void muteClicked();
     void soloClicked();
+    void gainChanged();
 
-    //==========================================================================
-    // MIDI-Learn context menu
-    void mouseDown(const juce::MouseEvent& e) override;
-    void showMidiContextMenu(juce::Component* control, MidiControlTarget target);
-    juce::String getMidiAssignmentLabel(MidiControlTarget target) const;
+    void showContextMenu(const juce::MouseEvent& e);
+    void showMidiLearnMenu(juce::Component* target);
+
+    bool isActiveChannel()  const { return audioEngine.getActiveChannel() == channelIndex; }
+    bool channel_hasLoop()  const;  // helper — avoids repeated null-check
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChannelStripComponent)
 };

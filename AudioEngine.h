@@ -5,34 +5,37 @@
 #include <memory>
 #include "Command.h"
 #include "LoopEngine.h"
+#include "Metronome.h"
 #include "PluginHostWrapper.h"
 #include "Channel.h"
 #include "MidiLearnManager.h"
-#include "Metronome.h"          // NEW
 
-// Forward declarations
 class AudioChannel;
 class VSTiChannel;
 
+//==============================================================================
 /**
  * @file AudioEngine.h
  * @brief Main audio processing engine
+ *
+ * Thread-safety:
+ *   Audio thread  : audioDeviceIOCallbackWithContext()
+ *   MIDI thread   : handleIncomingMidiMessage()
+ *   Message thread: everything else
  */
-
-//==============================================================================
 class AudioEngine : public juce::AudioIODeviceCallback,
                     public juce::MidiInputCallback
 {
 public:
-    //==============================================================================
     AudioEngine();
     ~AudioEngine() override;
 
-    //==============================================================================
-    // AudioIODeviceCallback interface
-    //==============================================================================
+    //==========================================================================
+    // AudioIODeviceCallback
+    //==========================================================================
 
-    void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
+    void audioDeviceIOCallbackWithContext(
+        const float* const* inputChannelData,
         int numInputChannels,
         float* const* outputChannelData,
         int numOutputChannels,
@@ -42,57 +45,69 @@ public:
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;
 
-    // MidiInputCallback interface
+    //==========================================================================
+    // MidiInputCallback
+    //==========================================================================
+
     void handleIncomingMidiMessage(juce::MidiInput* source,
                                    const juce::MidiMessage& message) override;
 
-    //==============================================================================
-    // Public Control Interface (Message Thread)
-    //==============================================================================
+    void openMidiInputs();
 
-    bool sendCommand(const Command& cmd);
+    //==========================================================================
+    // Initialization
+    //==========================================================================
 
     juce::String initialiseAudio(int inputChannels  = 2,
                                  int outputChannels = 2,
                                  double sampleRate  = 0.0,
                                  int bufferSize     = 0);
 
-    juce::AudioDeviceManager& getDeviceManager() { return deviceManager; }
+    //==========================================================================
+    // Command Queue
+    //==========================================================================
 
-    LoopEngine& getLoopEngine() { return *loopEngine; }
+    bool sendCommand(const Command& cmd);
 
+    //==========================================================================
+    // Device Info
+    //==========================================================================
+
+    juce::AudioDeviceManager& getDeviceManager()    { return deviceManager; }
     int    getNumInputChannels()  const { return numInputChannels; }
     int    getNumOutputChannels() const { return numOutputChannels; }
     double getSampleRate()        const { return currentSampleRate; }
     int    getBufferSize()        const { return currentBufferSize; }
 
-    void openMidiInputs();
-
-    MidiLearnManager& getMidiLearnManager() { return *midiLearnManager; }
-
-    //==============================================================================
+    //==========================================================================
     // Channel Management
-    //==============================================================================
+    //==========================================================================
 
     Channel*    getChannel(int index);
     void        setChannelType(int index, ChannelType type);
     ChannelType getChannelType(int index) const;
 
-    //==============================================================================
+    //==========================================================================
     // Plugin Management
-    //==============================================================================
+    //==========================================================================
 
+    /** Non-owning access to plugin host for state serialization (Message Thread). */
     PluginHostWrapper& getPluginHost() { return *pluginHost; }
 
+    /**
+     * @brief Load plugin asynchronously, optionally restoring saved state.
+     * @param stateBase64  Base64-encoded plugin state. Applied after load. Empty = default state.
+     */
     void loadPluginAsync(int channelIndex,
                          int slotIndex,
-                         const juce::String& pluginIdentifier);
+                         const juce::String& pluginIdentifier,
+                         const juce::String& stateBase64 = {});
 
     void removePlugin(int channelIndex, int slotIndex);
 
-    //==============================================================================
-    // Global State
-    //==============================================================================
+    //==========================================================================
+    // Global Playback State
+    //==========================================================================
 
     void setPlaying(bool shouldPlay);
     bool isPlaying() const { return isPlayingFlag.load(std::memory_order_relaxed); }
@@ -102,76 +117,119 @@ public:
 
     void emergencyStop();
 
-    //==============================================================================
-    // Metronome (NEW)
-    //==============================================================================
+    //==========================================================================
+    // Loop Engine
+    //==========================================================================
 
-    /**
-     * @brief Direct access to the metronome for TransportComponent.
-     * All setters on Metronome are atomic — safe to call from the message thread.
-     */
+    LoopEngine& getLoopEngine() { return *loopEngine; }
+
+    //==========================================================================
+    // Active Channel Navigation (Spec Abschnitt 7)
+    //==========================================================================
+
+    /** Currently active channel index (0-5). MIDI-mappable target for rec/play/stop. */
+    int  getActiveChannel() const { return activeChannelIndex.load(std::memory_order_relaxed); }
+
+    /** Set active channel directly (clamped to 0-5). */
+    void setActiveChannel(int index);
+
+    /** Move active channel to next slot (wraps around). */
+    void nextChannel();
+
+    /** Move active channel to previous slot (wraps around). */
+    void prevChannel();
+
+    //==========================================================================
+    // Metronome
+    //==========================================================================
+
     Metronome& getMetronome() { return *metronome; }
 
     /**
-     * @brief Convenience: enable / disable metronome and send state to Song.
-     * Wraps Metronome::setEnabled() and also stores the flag so it can be
-     * persisted via SongManager.
+     * @brief Metronom-Modus an/aus.
+     *
+     * GEBLOCKT wenn hasAnyRecordings() == true.
+     *
+     * AN  → Loop-Länge sofort aus BPM × Beats berechnet, bleibt fix.
+     * AUS → Loop-Länge auf 0 zurückgesetzt (freier Modus).
      */
     void setMetronomeEnabled(bool enabled);
 
     /**
-     * @brief Convenience: set metronome output channel pair.
+     * @brief Click-Sound stumm/laut.  Timing/Modus bleibt aktiv.
+     * Kann jederzeit geändert werden — unabhängig von hasAnyRecordings().
      */
+    void setMetronomeMuted(bool muted);
+
+    /** @brief Ausgangskanal-Paar für den Click. */
     void setMetronomeOutput(int leftChannel, int rightChannel);
 
-    //==============================================================================
-    // Diagnostics
-    //==============================================================================
+    //==========================================================================
+    // Song Reset
+    //==========================================================================
 
-    double getCPUUsage()         const { return deviceManager.getCpuUsage() * 100.0; }
+    /**
+     * @brief Alle Channels clearen + Loop-Länge zurücksetzen.
+     * Nach diesem Aufruf ist hasAnyRecordings() == false → Metronom schaltbar.
+     */
+    void resetSong();
+
+    /** @brief true wenn irgendein Channel aufgenommenen Inhalt hat. */
+    bool hasAnyRecordings() const;
+
+    //==========================================================================
+    // Diagnostics
+    //==========================================================================
+
+    double getCPUUsage()           const { return deviceManager.getCpuUsage() * 100.0; }
     int    getNumPendingCommands() const { return commandQueue.getNumPending(); }
-    bool   isCommandQueueFull()   const { return commandQueue.isFull(); }
+    bool   isCommandQueueFull()    const { return commandQueue.isFull(); }
+
+    MidiLearnManager& getMidiLearnManager() { return *midiLearnManager; }
 
 private:
-    //==============================================================================
+    //==========================================================================
     // Core components
-    juce::AudioDeviceManager         deviceManager;
-    std::unique_ptr<LoopEngine>       loopEngine;
+    juce::AudioDeviceManager       deviceManager;
+    std::unique_ptr<LoopEngine>    loopEngine;
+    std::unique_ptr<Metronome>     metronome;
     std::unique_ptr<PluginHostWrapper> pluginHost;
     std::unique_ptr<MidiLearnManager> midiLearnManager;
-    std::unique_ptr<Metronome>        metronome;       // NEW
-    CommandQueue                      commandQueue;
+    CommandQueue commandQueue;
 
-    // Channels (6 stereo channels)
+    // 6 stereo channels
     std::array<std::unique_ptr<Channel>, 6> channels;
 
-    //==============================================================================
-    // Audio thread state
+    // MIDI: thread-safe bridge between MIDI thread and audio thread
+    juce::MidiMessageCollector midiCollector;
+
+    //==========================================================================
+    // Audio thread state (written only from audioDeviceAboutToStart)
     int    numInputChannels  {0};
     int    numOutputChannels {0};
     double currentSampleRate {44100.0};
     int    currentBufferSize {512};
 
-    // Global flags
-    std::atomic<bool>         isPlayingFlag    {false};
-    std::atomic<bool>         overdubMode      {false};
-    std::atomic<bool>         isInitialised    {false};
+    // Atomics (shared between threads)
+    std::atomic<bool> isPlayingFlag  {false};
+    std::atomic<bool> overdubMode    {false};
+    std::atomic<bool> isInitialised  {false};
+    std::atomic<int>  activeChannelIndex {0};
 
-    // Working buffers for audio thread
+    // Working buffers (audio thread only)
     juce::AudioBuffer<float> inputBuffer;
     juce::AudioBuffer<float> outputBuffer;
 
-    // Performance monitoring
+    // Diagnostics
     std::atomic<juce::int64>  totalSamplesProcessed {0};
     std::atomic<juce::int32>  xrunCount             {0};
 
-    //==============================================================================
+    //==========================================================================
     // Command processing (audio thread)
-    void processCommand(const Command& cmd);
-    void processGlobalCommand(const Command& cmd);
+    void processCommand       (const Command& cmd);
+    void processGlobalCommand (const Command& cmd);
     void processChannelCommand(const Command& cmd);
 
-    // Buffer management
     void clearOutputBuffer(float* const* outputChannelData, int numChannels, int numSamples);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)

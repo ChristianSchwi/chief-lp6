@@ -1,186 +1,196 @@
 #include "SongManager.h"
 #include "PluginHostWrapper.h"
-#include "AudioChannel.h"
 #include "VSTiChannel.h"
 
 //==============================================================================
-SongManager::SongManager()
-{
-}
-
-SongManager::~SongManager()
-{
-}
+SongManager::SongManager()  {}
+SongManager::~SongManager() {}
 
 //==============================================================================
-// Song Save/Load
+// Save
 //==============================================================================
 
 juce::Result SongManager::saveSong(Song& song, AudioEngine& audioEngine)
 {
-    // Update timestamp
     song.lastModified = juce::Time::getCurrentTime();
-    
-    // Ensure directory exists
+
     auto result = song.createDirectory();
-    if (result.failed())
-        return result;
-    
-    // Read current state from audio engine
-    song.loopLengthSamples = audioEngine.getLoopEngine().getLoopLength();
-    song.bpm = audioEngine.getLoopEngine().getBPM();
-    song.beatsPerLoop = audioEngine.getLoopEngine().getBeatsPerLoop();
-    song.quantizationEnabled = audioEngine.getLoopEngine().isQuantizationEnabled();
-    
-    // Save each channel
+    if (result.failed()) return result;
+
+    // Global state
+    song.loopLengthSamples    = audioEngine.getLoopEngine().getLoopLength();
+    song.bpm                  = audioEngine.getLoopEngine().getBPM();
+    song.beatsPerLoop         = audioEngine.getLoopEngine().getBeatsPerLoop();
+    song.quantizationEnabled  = audioEngine.getLoopEngine().isQuantizationEnabled();
+    song.metronomeEnabled     = audioEngine.getMetronome().getEnabled();
+    song.metronomeOutputLeft  = audioEngine.getMetronome().getOutputLeft();
+    song.metronomeOutputRight = audioEngine.getMetronome().getOutputRight();
+
+    const juce::int64 loopLen = song.loopLengthSamples;
+
     for (int i = 0; i < 6; ++i)
     {
         auto* channel = audioEngine.getChannel(i);
-        if (!channel)
-            continue;
-        
-        // Read channel configuration
+        if (!channel) continue;
+
+        // Reads basic params + plugin states
         song.channels[i] = readChannelState(channel, audioEngine, i);
-        
-        // Save loop file if channel has content
-        if (channel->hasLoop())
+
+        // Save loop buffer if content exists and loop length is known
+        if (channel->hasLoop() && loopLen > 0)
         {
-            auto loopFile = song.getLoopFile(i);
-            // Note: We need to read loop buffer from channel
-            // This requires adding a getLoopBuffer() method to Channel
-            // For now, mark that loop exists
-            song.channels[i].hasLoopData = true;
-            song.channels[i].loopFileName = loopFile.getFileName();
+            auto loopFile  = song.getLoopFile(i);
+            auto saveResult = saveLoopFile(loopFile, channel->getLoopBuffer(), loopLen);
+
+            if (saveResult.failed())
+            {
+                DBG("WARNING: loop save failed for ch " + juce::String(i) +
+                    ": " + saveResult.getErrorMessage());
+                // non-fatal — continue
+            }
+            else
+            {
+                song.channels[i].hasLoopData  = true;
+                song.channels[i].loopFileName = loopFile.getFileName();
+            }
         }
     }
-    
-    // Serialize to JSON
-    auto json = songToJSON(song);
-    
-    // Write JSON file
-    auto songFile = song.getSongFile();
-    auto jsonString = juce::JSON::toString(json, true);  // Pretty print
-    
+
+    auto json       = songToJSON(song);
+    auto songFile   = song.getSongFile();
+    auto jsonString = juce::JSON::toString(json, true);
+
     if (!songFile.replaceWithText(jsonString))
-    {
         return juce::Result::fail("Failed to write song.json: " + songFile.getFullPathName());
-    }
-    
+
     DBG("Song saved: " + songFile.getFullPathName());
     return juce::Result::ok();
 }
+
+//==============================================================================
+// Load
+//==============================================================================
 
 juce::Result SongManager::loadSong(const juce::File& songFile, Song& song)
 {
     if (!songFile.existsAsFile())
         return juce::Result::fail("Song file not found: " + songFile.getFullPathName());
-    
-    // Read JSON
-    juce::String jsonString = songFile.loadFileAsString();
-    auto json = juce::JSON::parse(jsonString);
-    
+
+    auto json = juce::JSON::parse(songFile.loadFileAsString());
     if (!json.isObject())
         return juce::Result::fail("Invalid JSON in song file");
-    
-    // Deserialize
+
     auto result = jsonToSong(json, song);
-    if (result.failed())
-        return result;
-    
-    // Set song directory
+    if (result.failed()) return result;
+
     song.songDirectory = songFile.getParentDirectory();
-    
+
     DBG("Song loaded: " + songFile.getFullPathName());
     return juce::Result::ok();
 }
 
+//==============================================================================
+// Apply to Engine
+//==============================================================================
+
 juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audioEngine)
 {
-    DBG("Applying song to audio engine: " + song.songName);
-    
-    // Stop playback first
+    DBG("Applying song to engine: " + song.songName);
+
     bool wasPlaying = audioEngine.isPlaying();
-    if (wasPlaying)
-        audioEngine.setPlaying(false);
-    
-    // Apply global settings
+    if (wasPlaying) audioEngine.setPlaying(false);
+
+    // Global loop settings
     audioEngine.getLoopEngine().setBPM(song.bpm);
     audioEngine.getLoopEngine().setBeatsPerLoop(song.beatsPerLoop);
     audioEngine.getLoopEngine().setQuantizationEnabled(song.quantizationEnabled);
-    
+
     if (song.loopLengthSamples > 0)
-    {
         audioEngine.getLoopEngine().setLoopLength(song.loopLengthSamples);
-    }
     else
-    {
         audioEngine.getLoopEngine().calculateLoopLengthFromBPM();
-    }
-    
-    // Apply each channel configuration
+
+    // Metronome
+    audioEngine.getMetronome().setEnabled(song.metronomeEnabled);
+    audioEngine.getMetronome().setBPM(song.bpm);
+    audioEngine.getMetronome().setOutputChannels(song.metronomeOutputLeft,
+                                                 song.metronomeOutputRight);
+
     for (int i = 0; i < 6; ++i)
     {
-        const auto& channelConfig = song.channels[i];
-        
-        // Set channel type
-        audioEngine.setChannelType(i, channelConfig.type);
-        
+        const auto& cfg = song.channels[i];
+
+        // setChannelType() creates + prepares channel if audio is initialised
+        audioEngine.setChannelType(i, cfg.type);
+
         auto* channel = audioEngine.getChannel(i);
-        if (!channel)
-            continue;
-        
-        // Apply basic settings
-        channel->setGainDb(channelConfig.gainDb);
-        channel->setMonitorMode(channelConfig.monitorMode);
-        channel->setMuted(channelConfig.muted);
-        channel->setSolo(channelConfig.solo);
-        
-        // Apply routing
-        channel->setRouting(channelConfig.routing);
-        
-        // Load plugins
-        // TODO: This should be async and handled carefully
-        // For now, just log what would be loaded
-        
-        if (channelConfig.type == ChannelType::VSTi)
+        if (!channel) continue;
+
+        channel->setGainDb    (cfg.gainDb);
+        channel->setMonitorMode(cfg.monitorMode);
+        channel->setMuted      (cfg.muted);
+        channel->setSolo       (cfg.solo);
+        channel->setRouting    (cfg.routing);
+
+        // --- Loop file ---
+        if (cfg.hasLoopData && !cfg.loopFileName.isEmpty())
         {
-            if (!channelConfig.vstInstrument.identifier.isEmpty())
-            {
-                DBG("  Channel " + juce::String(i) + " VSTi: " + 
-                    channelConfig.vstInstrument.name);
-            }
-        }
-        
-        for (int slot = 0; slot < 3; ++slot)
-        {
-            const auto& pluginData = channelConfig.fxPlugins[slot];
-            if (!pluginData.identifier.isEmpty())
-            {
-                DBG("  Channel " + juce::String(i) + " FX[" + juce::String(slot) + "]: " + 
-                    pluginData.name);
-            }
-        }
-        
-        // Load loop file if exists
-        if (channelConfig.hasLoopData)
-        {
-            auto loopFile = song.songDirectory.getChildFile(channelConfig.loopFileName);
+            auto loopFile = song.songDirectory.getChildFile(cfg.loopFileName);
+
             if (loopFile.existsAsFile())
             {
-                DBG("  Channel " + juce::String(i) + " loop: " + loopFile.getFileName());
-                // TODO: Load loop file into channel
+                // BUG 2 FIX: check channel was prepared before attempting load
+                if (channel->getLoopBufferSize() == 0)
+                {
+                    DBG("WARNING: ch " + juce::String(i) +
+                        " not yet prepared — loop file not loaded. "
+                        "Call applySongToEngine() after initialiseAudio().");
+                }
+                else
+                {
+                    const juce::int64 maxSamples = channel->getLoopBufferSize();
+                    juce::AudioBuffer<float> tmp(2, static_cast<int>(maxSamples));
+                    tmp.clear();
+
+                    const juce::int64 loaded = loadLoopFile(loopFile, tmp, maxSamples);
+                    if (loaded > 0)
+                    {
+                        if (!channel->loadLoopData(tmp, loaded))
+                            DBG("WARNING: ch " + juce::String(i) + " loadLoopData failed");
+                        else
+                            DBG("  ch " + juce::String(i) + ": " +
+                                juce::String(loaded) + " samples loaded");
+                    }
+                    else
+                    {
+                        DBG("WARNING: loop file could not be read: " + loopFile.getFullPathName());
+                    }
+                }
             }
             else
             {
-                DBG("  WARNING: Loop file missing: " + loopFile.getFullPathName());
+                DBG("WARNING: loop file missing: " + loopFile.getFullPathName());
             }
         }
+
+        // --- Plugins (async) — state is passed into callback ---
+        if (cfg.type == ChannelType::VSTi && !cfg.vstInstrument.identifier.isEmpty())
+        {
+            audioEngine.loadPluginAsync(i, -1,
+                                        cfg.vstInstrument.identifier,
+                                        cfg.vstInstrument.stateBase64);
+        }
+
+        for (int slot = 0; slot < 3; ++slot)
+        {
+            const auto& pd = cfg.fxPlugins[slot];
+            if (!pd.identifier.isEmpty())
+                audioEngine.loadPluginAsync(i, slot, pd.identifier, pd.stateBase64);
+        }
     }
-    
-    // Restore playback state
-    if (wasPlaying)
-        audioEngine.setPlaying(true);
-    
+
+    if (wasPlaying) audioEngine.setPlaying(true);
+
     return juce::Result::ok();
 }
 
@@ -189,148 +199,148 @@ juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audio
 //==============================================================================
 
 juce::Result SongManager::saveLoopFile(const juce::File& file,
-                                      const juce::AudioBuffer<float>& buffer,
-                                      juce::int64 numSamples)
+                                       const juce::AudioBuffer<float>& buffer,
+                                       juce::int64 numSamples)
 {
     if (numSamples <= 0 || buffer.getNumChannels() < 2)
         return juce::Result::fail("Invalid buffer");
-    
-    // Create output stream
+    if (buffer.getNumSamples() < static_cast<int>(numSamples))
+        return juce::Result::fail("Buffer smaller than numSamples");
+
     std::unique_ptr<juce::FileOutputStream> stream(file.createOutputStream());
     if (!stream)
-        return juce::Result::fail("Cannot create file: " + file.getFullPathName());
-    
-    // Write header
-    stream->writeInt(0x4C4F4F50);  // "LOOP" magic number
-    stream->writeInt(1);            // Version
-    stream->writeInt64(numSamples); // Number of samples
-    stream->writeInt(2);            // Channels (always stereo)
-    stream->writeFloat(44100.0f);   // Sample rate (informational)
-    
-    // Write audio data (interleaved stereo, 32-bit float)
-    const int samplesToWrite = static_cast<int>(juce::jmin(numSamples, 
-                                                            static_cast<juce::int64>(buffer.getNumSamples())));
-    
-    for (int i = 0; i < samplesToWrite; ++i)
+        return juce::Result::fail("Cannot create: " + file.getFullPathName());
+
+    stream->writeInt  (0x4C4F4F50);  // "LOOP" magic
+    stream->writeInt  (1);            // version
+    stream->writeInt64(numSamples);
+    stream->writeInt  (2);            // always stereo
+    stream->writeFloat(44100.0f);     // informational
+
+    const float* L = buffer.getReadPointer(0);
+    const float* R = buffer.getReadPointer(1);
+    for (juce::int64 i = 0; i < numSamples; ++i)
     {
-        stream->writeFloat(buffer.getSample(0, i));  // Left
-        stream->writeFloat(buffer.getSample(1, i));  // Right
+        stream->writeFloat(L[i]);
+        stream->writeFloat(R[i]);
     }
-    
     stream->flush();
-    
-    DBG("Loop file saved: " + file.getFullPathName() + 
+
+    DBG("Loop file saved: " + file.getFullPathName() +
         " (" + juce::String(numSamples) + " samples)");
-    
     return juce::Result::ok();
 }
 
 juce::int64 SongManager::loadLoopFile(const juce::File& file,
-                                juce::AudioBuffer<float>& buffer,
-                                juce::int64 maxSamples)
+                                      juce::AudioBuffer<float>& buffer,
+                                      juce::int64 maxSamples)
 {
     if (!file.existsAsFile())
     {
         DBG("Loop file not found: " + file.getFullPathName());
         return -1;
     }
-    
-    // Create input stream
+
     std::unique_ptr<juce::FileInputStream> stream(file.createInputStream());
-    if (!stream)
+    if (!stream) return -1;
+
+    if (stream->readInt() != 0x4C4F4F50)
     {
-        DBG("Cannot open file: " + file.getFullPathName());
+        DBG("Invalid loop file magic: " + file.getFullPathName());
         return -1;
     }
-    
-    // Read header
-    int magic = stream->readInt();
-    if (magic != 0x4C4F4F50)  // "LOOP"
-    {
-        DBG("Invalid loop file format");
-        return -1;
-    }
-    
-    int version = stream->readInt();
-    juce::int64 numSamples = stream->readInt64();
-    int numChannels = stream->readInt();
-    float sampleRate = stream->readFloat();
-    
-    DBG("Loading loop file: " + file.getFileName());
-    DBG("  Samples: " + juce::String(numSamples));
-    DBG("  Channels: " + juce::String(numChannels));
-    DBG("  Sample rate: " + juce::String(sampleRate));
-    
-    if (numChannels != 2)
-    {
-        DBG("Only stereo loops supported");
-        return -1;
-    }
-    
-    // Clamp to buffer size
+    /*version*/      stream->readInt();
+    const juce::int64 numSamples  = stream->readInt64();
+    const int         numChannels = stream->readInt();
+    /*sampleRate*/   stream->readFloat();
+
+    if (numChannels != 2 || numSamples <= 0) return -1;
+
     const juce::int64 samplesToRead = juce::jmin(numSamples, maxSamples);
-    
-    // Ensure buffer is large enough
-    if (buffer.getNumSamples() < samplesToRead)
+    if (buffer.getNumSamples() < static_cast<int>(samplesToRead) ||
+        buffer.getNumChannels() < 2)
     {
-        DBG("Buffer too small for loop data");
+        DBG("Target buffer too small");
         return -1;
     }
-    
-    // Read audio data (interleaved stereo)
+
+    float* L = buffer.getWritePointer(0);
+    float* R = buffer.getWritePointer(1);
     for (juce::int64 i = 0; i < samplesToRead; ++i)
     {
-        float left = stream->readFloat();
-        float right = stream->readFloat();
-        
-        buffer.setSample(0, static_cast<int>(i), left);
-        buffer.setSample(1, static_cast<int>(i), right);
+        L[i] = stream->readFloat();
+        R[i] = stream->readFloat();
     }
-    
-    DBG("Loop file loaded: " + juce::String(samplesToRead) + " samples");
-    
+
+    DBG("Loop loaded: " + file.getFileName() +
+        " (" + juce::String(samplesToRead) + "/" + juce::String(numSamples) + " samples)");
     return samplesToRead;
 }
 
 //==============================================================================
-// Utilities
+// readChannelState — liest auch Plugin-States
 //==============================================================================
 
-juce::File SongManager::createSongDirectory(const juce::File& parentDirectory,
-                                            const juce::String& songName)
+ChannelConfig SongManager::readChannelState(Channel* channel,
+                                            AudioEngine& audioEngine,
+                                            int channelIndex)
 {
-    // Sanitize song name for file system
-    juce::String safeName = songName.trim();
-    safeName = safeName.replaceCharacters("/\\:*?\"<>|", "_________");
-    
-    if (safeName.isEmpty())
-        safeName = "Untitled";
-    
-    auto songDir = parentDirectory.getChildFile(safeName);
-    
-    // Make unique if exists
-    int suffix = 1;
-    auto originalDir = songDir;
-    while (songDir.exists())
-    {
-        songDir = originalDir.getSiblingFile(safeName + " " + juce::String(suffix));
-        ++suffix;
-    }
-    
-    if (songDir.createDirectory())
-        return songDir;
-    
-    return juce::File();
-}
+    ChannelConfig cfg;
+    if (!channel) return cfg;
 
-bool SongManager::isValidSongDirectory(const juce::File& songDirectory)
-{
-    if (!songDirectory.exists() || !songDirectory.isDirectory())
-        return false;
-    
-    // Check for song.json
-    auto songFile = songDirectory.getChildFile("song.json");
-    return songFile.existsAsFile();
+    cfg.type        = channel->getType();
+    cfg.gainDb      = channel->getGainDb();
+    cfg.monitorMode = channel->getMonitorMode();
+    cfg.muted       = channel->isMuted();
+    cfg.solo        = channel->isSolo();
+    cfg.routing     = channel->getRouting();
+    cfg.hasLoopData = channel->hasLoop();
+
+    if (cfg.hasLoopData)
+        cfg.loopFileName = "channel_" + juce::String(channelIndex) + ".loop";
+
+    // --- VSTi instrument state ---
+    if (cfg.type == ChannelType::VSTi)
+    {
+        auto* vstiChannel = static_cast<VSTiChannel*>(channel);
+        auto* vsti        = vstiChannel->getVSTi();
+
+        if (vsti)
+        {
+            cfg.vstInstrument.identifier = vsti->getPluginDescription().createIdentifierString();
+            cfg.vstInstrument.name       = vsti->getName();
+            cfg.vstInstrument.manufacturer = vsti->getPluginDescription().manufacturerName;
+            cfg.vstInstrument.slotIndex  = -1;
+            cfg.vstInstrument.bypassed   = false;
+
+            // Save plugin state as Base64
+            const auto block = audioEngine.getPluginHost().savePluginState(vsti);
+            if (block.getSize() > 0)
+                cfg.vstInstrument.stateBase64 =
+                    PluginHostWrapper::memoryBlockToBase64(block);
+        }
+    }
+
+    // --- FX slot states ---
+    for (int slot = 0; slot < 3; ++slot)
+    {
+        auto* plugin = channel->getPlugin(slot);
+        if (!plugin) continue;
+
+        auto& pd = cfg.fxPlugins[slot];
+        pd.slotIndex    = slot;
+        pd.identifier   = plugin->getPluginDescription().createIdentifierString();
+        pd.name         = plugin->getName();
+        pd.manufacturer = plugin->getPluginDescription().manufacturerName;
+        pd.bypassed     = channel->isPluginBypassed(slot);
+
+        // Save plugin state as Base64
+        const auto block = audioEngine.getPluginHost().savePluginState(plugin);
+        if (block.getSize() > 0)
+            pd.stateBase64 = PluginHostWrapper::memoryBlockToBase64(block);
+    }
+
+    return cfg;
 }
 
 //==============================================================================
@@ -340,256 +350,179 @@ bool SongManager::isValidSongDirectory(const juce::File& songDirectory)
 juce::var SongManager::songToJSON(const Song& song)
 {
     auto* obj = new juce::DynamicObject();
-    
-    // Metadata
-    obj->setProperty("format_version", song.formatVersion);
-    obj->setProperty("song_name", song.songName);
-    obj->setProperty("description", song.description);
-    obj->setProperty("creation_time", song.creationTime.toISO8601(true));
-    obj->setProperty("last_modified", song.lastModified.toISO8601(true));
-    
-    // Global settings
-    obj->setProperty("loop_length_samples", song.loopLengthSamples);
-    obj->setProperty("bpm", song.bpm);
-    obj->setProperty("beats_per_loop", song.beatsPerLoop);
-    obj->setProperty("quantization_enabled", song.quantizationEnabled);
-    
-    // Metronome
-    obj->setProperty("metronome_enabled", song.metronomeEnabled);
+
+    obj->setProperty("format_version",        song.formatVersion);
+    obj->setProperty("song_name",             song.songName);
+    obj->setProperty("description",           song.description);
+    obj->setProperty("creation_time",         song.creationTime.toISO8601(true));
+    obj->setProperty("last_modified",         song.lastModified .toISO8601(true));
+    obj->setProperty("loop_length_samples",   song.loopLengthSamples);
+    obj->setProperty("bpm",                   song.bpm);
+    obj->setProperty("beats_per_loop",        song.beatsPerLoop);
+    obj->setProperty("quantization_enabled",  song.quantizationEnabled);
+    obj->setProperty("metronome_enabled",     song.metronomeEnabled);
     obj->setProperty("metronome_output_left", song.metronomeOutputLeft);
-    obj->setProperty("metronome_output_right", song.metronomeOutputRight);
-    
-    // Channels
-    juce::Array<juce::var> channelsArray;
-    for (const auto& channel : song.channels)
-    {
-        channelsArray.add(channelToJSON(channel));
-    }
-    obj->setProperty("channels", channelsArray);
-    
+    obj->setProperty("metronome_output_right",song.metronomeOutputRight);
+
+    juce::Array<juce::var> chArr;
+    for (const auto& ch : song.channels)
+        chArr.add(channelToJSON(ch));
+    obj->setProperty("channels", chArr);
+
     return juce::var(obj);
 }
 
 juce::Result SongManager::jsonToSong(const juce::var& json, Song& song)
 {
-    if (!json.isObject())
-        return juce::Result::fail("JSON is not an object");
-    
+    if (!json.isObject()) return juce::Result::fail("JSON not an object");
     auto* obj = json.getDynamicObject();
-    
-    // Metadata
-    song.formatVersion = obj->getProperty("format_version").toString();
-    song.songName = obj->getProperty("song_name").toString();
-    song.description = obj->getProperty("description").toString();
-    song.creationTime = juce::Time::fromISO8601(obj->getProperty("creation_time").toString());
-    song.lastModified = juce::Time::fromISO8601(obj->getProperty("last_modified").toString());
-    
-    // Global settings
+
+    song.formatVersion     = obj->getProperty("format_version").toString();
+    song.songName          = obj->getProperty("song_name")     .toString();
+    song.description       = obj->getProperty("description")   .toString();
+    song.creationTime      = juce::Time::fromISO8601(obj->getProperty("creation_time").toString());
+    song.lastModified      = juce::Time::fromISO8601(obj->getProperty("last_modified") .toString());
     song.loopLengthSamples = obj->getProperty("loop_length_samples");
-    song.bpm = obj->getProperty("bpm");
-    song.beatsPerLoop = obj->getProperty("beats_per_loop");
-    song.quantizationEnabled = obj->getProperty("quantization_enabled");
-    
-    // Metronome
-    song.metronomeEnabled = obj->getProperty("metronome_enabled");
-    song.metronomeOutputLeft = obj->getProperty("metronome_output_left");
+    song.bpm               = obj->getProperty("bpm");
+    song.beatsPerLoop      = obj->getProperty("beats_per_loop");
+    song.quantizationEnabled  = obj->getProperty("quantization_enabled");
+    song.metronomeEnabled     = obj->getProperty("metronome_enabled");
+    song.metronomeOutputLeft  = obj->getProperty("metronome_output_left");
     song.metronomeOutputRight = obj->getProperty("metronome_output_right");
-    
-    // Channels
-    auto* channelsArray = obj->getProperty("channels").getArray();
-    if (channelsArray && channelsArray->size() >= 6)
-    {
+
+    auto* chArr = obj->getProperty("channels").getArray();
+    if (chArr && chArr->size() >= 6)
         for (int i = 0; i < 6; ++i)
-        {
-            auto result = jsonToChannel(channelsArray->getReference(i), song.channels[i]);
-            if (result.failed())
-                DBG("Warning: Failed to load channel " + juce::String(i) + ": " + result.getErrorMessage());
-        }
-    }
-    
+            jsonToChannel(chArr->getReference(i), song.channels[i]);
+
     return juce::Result::ok();
 }
 
-juce::var SongManager::channelToJSON(const ChannelConfig& channel)
+juce::var SongManager::channelToJSON(const ChannelConfig& ch)
 {
     auto* obj = new juce::DynamicObject();
-    
-    // Type and basic settings
-    obj->setProperty("type", channel.type == ChannelType::Audio ? "Audio" : "VSTi");
-    obj->setProperty("gain_db", channel.gainDb);
-    obj->setProperty("monitor_mode", static_cast<int>(channel.monitorMode));
-    obj->setProperty("muted", channel.muted);
-    obj->setProperty("solo", channel.solo);
-    
-    // Routing
-    obj->setProperty("routing", routingToJSON(channel.routing));
-    
-    // VSTi instrument
-    if (channel.type == ChannelType::VSTi && !channel.vstInstrument.identifier.isEmpty())
-    {
-        obj->setProperty("vsti", pluginToJSON(channel.vstInstrument));
-    }
-    
-    // FX plugins
-    juce::Array<juce::var> fxArray;
-    for (const auto& plugin : channel.fxPlugins)
-    {
-        if (!plugin.identifier.isEmpty())
-        {
-            fxArray.add(pluginToJSON(plugin));
-        }
-    }
-    if (fxArray.size() > 0)
-    {
-        obj->setProperty("fx_plugins", fxArray);
-    }
-    
-    // Loop data
-    obj->setProperty("has_loop_data", channel.hasLoopData);
-    obj->setProperty("loop_file_name", channel.loopFileName);
-    
+
+    obj->setProperty("type",         ch.type == ChannelType::Audio ? "Audio" : "VSTi");
+    obj->setProperty("gain_db",      ch.gainDb);
+    obj->setProperty("monitor_mode", static_cast<int>(ch.monitorMode));
+    obj->setProperty("muted",        ch.muted);
+    obj->setProperty("solo",         ch.solo);
+    obj->setProperty("routing",      routingToJSON(ch.routing));
+    obj->setProperty("has_loop_data",ch.hasLoopData);
+    obj->setProperty("loop_file_name",ch.loopFileName);
+
+    if (ch.type == ChannelType::VSTi && !ch.vstInstrument.identifier.isEmpty())
+        obj->setProperty("vsti", pluginToJSON(ch.vstInstrument));
+
+    juce::Array<juce::var> fxArr;
+    for (const auto& pd : ch.fxPlugins)
+        if (!pd.identifier.isEmpty())
+            fxArr.add(pluginToJSON(pd));
+    if (fxArr.size() > 0)
+        obj->setProperty("fx_plugins", fxArr);
+
     return juce::var(obj);
 }
 
-juce::Result SongManager::jsonToChannel(const juce::var& json, ChannelConfig& channel)
+juce::Result SongManager::jsonToChannel(const juce::var& json, ChannelConfig& ch)
 {
-    if (!json.isObject())
-        return juce::Result::fail("Channel JSON is not an object");
-    
+    if (!json.isObject()) return juce::Result::fail("Channel JSON not an object");
     auto* obj = json.getDynamicObject();
-    
-    // Type
-    juce::String typeStr = obj->getProperty("type").toString();
-    channel.type = (typeStr == "VSTi") ? ChannelType::VSTi : ChannelType::Audio;
-    
-    // Basic settings
-    channel.gainDb = obj->getProperty("gain_db");
-    channel.monitorMode = static_cast<MonitorMode>((int)obj->getProperty("monitor_mode"));
-    channel.muted = obj->getProperty("muted");
-    channel.solo = obj->getProperty("solo");
-    
-    // Routing
-    jsonToRouting(obj->getProperty("routing"), channel.routing);
-    
-    // VSTi
+
+    ch.type        = (obj->getProperty("type").toString() == "VSTi")
+                     ? ChannelType::VSTi : ChannelType::Audio;
+    ch.gainDb      = obj->getProperty("gain_db");
+    ch.monitorMode = static_cast<MonitorMode>((int)obj->getProperty("monitor_mode"));
+    ch.muted       = obj->getProperty("muted");
+    ch.solo        = obj->getProperty("solo");
+    jsonToRouting(obj->getProperty("routing"), ch.routing);
+    ch.hasLoopData  = obj->getProperty("has_loop_data");
+    ch.loopFileName = obj->getProperty("loop_file_name").toString();
+
     if (obj->hasProperty("vsti"))
-    {
-        jsonToPlugin(obj->getProperty("vsti"), channel.vstInstrument);
-    }
-    
-    // FX plugins
+        jsonToPlugin(obj->getProperty("vsti"), ch.vstInstrument);
+
     if (obj->hasProperty("fx_plugins"))
     {
-        auto* fxArray = obj->getProperty("fx_plugins").getArray();
-        if (fxArray)
-        {
-            for (int i = 0; i < juce::jmin(3, fxArray->size()); ++i)
-            {
-                jsonToPlugin(fxArray->getReference(i), channel.fxPlugins[i]);
-            }
-        }
+        auto* fxArr = obj->getProperty("fx_plugins").getArray();
+        if (fxArr)
+            for (int i = 0; i < juce::jmin(3, fxArr->size()); ++i)
+                jsonToPlugin(fxArr->getReference(i), ch.fxPlugins[i]);
     }
-    
-    // Loop data
-    channel.hasLoopData = obj->getProperty("has_loop_data");
-    channel.loopFileName = obj->getProperty("loop_file_name").toString();
-    
+
     return juce::Result::ok();
 }
 
-juce::var SongManager::pluginToJSON(const PluginData& plugin)
+juce::var SongManager::pluginToJSON(const PluginData& p)
 {
     auto* obj = new juce::DynamicObject();
-    
-    obj->setProperty("slot_index", plugin.slotIndex);
-    obj->setProperty("identifier", plugin.identifier);
-    obj->setProperty("name", plugin.name);
-    obj->setProperty("manufacturer", plugin.manufacturer);
-    obj->setProperty("state_base64", plugin.stateBase64);
-    obj->setProperty("bypassed", plugin.bypassed);
-    
+    obj->setProperty("slot_index",   p.slotIndex);
+    obj->setProperty("identifier",   p.identifier);
+    obj->setProperty("name",         p.name);
+    obj->setProperty("manufacturer", p.manufacturer);
+    obj->setProperty("state_base64", p.stateBase64);
+    obj->setProperty("bypassed",     p.bypassed);
     return juce::var(obj);
 }
 
-juce::Result SongManager::jsonToPlugin(const juce::var& json, PluginData& plugin)
+juce::Result SongManager::jsonToPlugin(const juce::var& json, PluginData& p)
 {
-    if (!json.isObject())
-        return juce::Result::fail("Plugin JSON is not an object");
-    
+    if (!json.isObject()) return juce::Result::fail("Plugin JSON not an object");
     auto* obj = json.getDynamicObject();
-    
-    plugin.slotIndex = obj->getProperty("slot_index");
-    plugin.identifier = obj->getProperty("identifier").toString();
-    plugin.name = obj->getProperty("name").toString();
-    plugin.manufacturer = obj->getProperty("manufacturer").toString();
-    plugin.stateBase64 = obj->getProperty("state_base64").toString();
-    plugin.bypassed = obj->getProperty("bypassed");
-    
+    p.slotIndex    = obj->getProperty("slot_index");
+    p.identifier   = obj->getProperty("identifier")  .toString();
+    p.name         = obj->getProperty("name")         .toString();
+    p.manufacturer = obj->getProperty("manufacturer") .toString();
+    p.stateBase64  = obj->getProperty("state_base64") .toString();
+    p.bypassed     = obj->getProperty("bypassed");
     return juce::Result::ok();
 }
 
-juce::var SongManager::routingToJSON(const RoutingConfig& routing)
+juce::var SongManager::routingToJSON(const RoutingConfig& r)
 {
     auto* obj = new juce::DynamicObject();
-    
-    obj->setProperty("input_channel_left", routing.inputChannelLeft);
-    obj->setProperty("input_channel_right", routing.inputChannelRight);
-    obj->setProperty("output_channel_left", routing.outputChannelLeft);
-    obj->setProperty("output_channel_right", routing.outputChannelRight);
-    obj->setProperty("midi_channel_filter", routing.midiChannelFilter);
-    
+    obj->setProperty("input_left",   r.inputChannelLeft);
+    obj->setProperty("input_right",  r.inputChannelRight);
+    obj->setProperty("output_left",  r.outputChannelLeft);
+    obj->setProperty("output_right", r.outputChannelRight);
+    obj->setProperty("midi_filter",  r.midiChannelFilter);
     return juce::var(obj);
 }
 
-juce::Result SongManager::jsonToRouting(const juce::var& json, RoutingConfig& routing)
+juce::Result SongManager::jsonToRouting(const juce::var& json, RoutingConfig& r)
 {
-    if (!json.isObject())
-        return juce::Result::fail("Routing JSON is not an object");
-    
+    if (!json.isObject()) return juce::Result::fail("Routing JSON not an object");
     auto* obj = json.getDynamicObject();
-    
-    routing.inputChannelLeft = obj->getProperty("input_channel_left");
-    routing.inputChannelRight = obj->getProperty("input_channel_right");
-    routing.outputChannelLeft = obj->getProperty("output_channel_left");
-    routing.outputChannelRight = obj->getProperty("output_channel_right");
-    routing.midiChannelFilter = obj->getProperty("midi_channel_filter");
-    
+    r.inputChannelLeft   = obj->getProperty("input_left");
+    r.inputChannelRight  = obj->getProperty("input_right");
+    r.outputChannelLeft  = obj->getProperty("output_left");
+    r.outputChannelRight = obj->getProperty("output_right");
+    r.midiChannelFilter  = obj->getProperty("midi_filter");
     return juce::Result::ok();
 }
 
 //==============================================================================
-// Helper Methods
+// Utilities
 //==============================================================================
 
-ChannelConfig SongManager::readChannelState(Channel* channel,
-                                            AudioEngine& audioEngine,
-                                            int channelIndex)
+juce::File SongManager::createSongDirectory(const juce::File& parentDirectory,
+                                            const juce::String& songName)
 {
-    ChannelConfig config;
-    
-    if (!channel)
-        return config;
-    
-    // Type and basic settings
-    config.type = channel->getType();
-    config.gainDb = channel->getGainDb();
-    config.monitorMode = channel->getMonitorMode();
-    config.muted = channel->isMuted();
-    config.solo = channel->isSolo();
-    
-    // Routing
-    config.routing = channel->getRouting();
-    
-    // Plugins - TODO: Read actual plugin states
-    // This requires accessing the plugin chain from Channel
-    // For now, we'll mark them as empty
-    
-    // Loop data
-    config.hasLoopData = channel->hasLoop();
-    if (config.hasLoopData)
+    juce::String safeName = songName.trim()
+                             .replaceCharacters("/\\:*?\"<>|", "_________");
+    if (safeName.isEmpty()) safeName = "Untitled";
+
+    auto songDir     = parentDirectory.getChildFile(safeName);
+    auto originalDir = songDir;
+    int  suffix      = 1;
+    while (songDir.exists())
     {
-        config.loopFileName = "channel_" + juce::String(channelIndex) + ".loop";
+        songDir = originalDir.getSiblingFile(safeName + " " + juce::String(suffix++));
     }
-    
-    return config;
+    return songDir.createDirectory() ? songDir : juce::File();
+}
+
+bool SongManager::isValidSongDirectory(const juce::File& dir)
+{
+    return dir.isDirectory() && dir.getChildFile("song.json").existsAsFile();
 }
