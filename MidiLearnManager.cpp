@@ -356,7 +356,7 @@ bool MidiLearnManager::loadMappings(const juce::File& file)
 juce::File MidiLearnManager::getDefaultMappingsFile() const
 {
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("SixChannelLooper")
+        .getChildFile("chief")
         .getChildFile("MidiMappings.xml");
 }
 

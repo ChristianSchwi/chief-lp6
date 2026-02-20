@@ -76,10 +76,32 @@ void Channel::stopPlayback()
     state.store(ChannelState::Idle, std::memory_order_release);
 }
 
+void Channel::requestStopAtLoopEnd()
+{
+    stopPending.store(true, std::memory_order_release);
+}
+
+void Channel::checkAndExecutePendingStop(juce::int64 playheadPosition,
+                                          juce::int64 loopLength, int numSamples)
+{
+    if (!stopPending.load(std::memory_order_acquire)) return;
+    if (loopLength <= 0 || loopLength <= static_cast<juce::int64>(numSamples)
+        || playheadPosition >= static_cast<juce::int64>(numSamples))
+        return;
+
+    stopPending.store(false, std::memory_order_release);
+    const auto cur = state.load(std::memory_order_relaxed);
+    if (cur == ChannelState::Recording || cur == ChannelState::Overdubbing)
+        stopRecording();
+    else if (cur == ChannelState::Playing)
+        stopPlayback();
+}
+
 void Channel::clearLoop()
 {
     state.store(ChannelState::Idle, std::memory_order_release);
     loopHasContent.store(false,     std::memory_order_release);
+    stopPending.store(false,        std::memory_order_release);
     loopBuffer.clear();
 }
 

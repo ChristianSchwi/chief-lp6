@@ -39,7 +39,8 @@ private:
 
     //==========================================================================
     // Transport
-    juce::TextButton playStopButton{"Play"};
+    juce::TextButton   playStopButton{"Play"};
+    juce::ToggleButton overdubButton {"Overdub Mode"};
 
     // Loop settings
     juce::Label        bpmLabel   {"", "BPM:"};
@@ -54,6 +55,17 @@ private:
     juce::ToggleButton metronomeMuteButton{"Mute Click"};
     juce::Label        metroOutLabel      {"", "Metro Out:"};
     juce::ComboBox     metroOutputBox;
+
+    //==========================================================================
+    // Auto-Start
+    juce::ToggleButton autoStartButton     {"Auto Start"};
+    juce::Label        autoStartThreshLabel{"", "Threshold:"};
+    juce::Slider       autoStartSlider;
+
+    //==========================================================================
+    // Count-In
+    juce::Label    countInLabel{"", "Count In:"};
+    juce::ComboBox countInBox;
 
     //==========================================================================
     // Reset Song
@@ -72,12 +84,16 @@ private:
     void updateMetronomeButtonStates();
 
     void playStopClicked();
+    void overdubModeChanged();
     void bpmChanged();
     void beatsChanged();
     void quantizeChanged();
     void metronomeChanged();
     void metronomeMuteChanged();
     void metroOutputChanged();
+    void autoStartChanged();
+    void autoStartThresholdChanged();
+    void countInChanged();
     void resetSongClicked();
     void populateMetroOutputBox();
 

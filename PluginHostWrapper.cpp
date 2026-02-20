@@ -316,7 +316,7 @@ bool PluginHostWrapper::loadKnownPluginList(const juce::File& file)
 juce::File PluginHostWrapper::getDefaultPluginListFile() const
 {
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("SixChannelLooper")
+        .getChildFile("chief")
         .getChildFile("KnownPlugins.xml");
 }
 

@@ -66,12 +66,17 @@
       <FILE id="F9VSTiH" name="VSTiChannel.h" compile="0" resource="0" file="VSTiChannel.h"/>
     </GROUP>
   </MAINGROUP>
-  <JUCEOPTIONS JUCE_STRICT_REFCOUNTEDPOINTER="1" JUCE_WEB_BROWSER="0" JUCE_USE_CURL="0"/>
+  <JUCEOPTIONS JUCE_STRICT_REFCOUNTEDPOINTER="1" JUCE_WEB_BROWSER="0" JUCE_USE_CURL="0"
+               JUCE_ASIO="1" JUCE_PLUGINHOST_VST3="1"/>
   <EXPORTFORMATS>
-    <VS2022 targetFolder="Builds/VisualStudio2022">
+    <VS2022 targetFolder="Builds/VisualStudio2022" extraDefs="JUCE_ASIO=1">
       <CONFIGURATIONS>
-        <CONFIGURATION isDebug="1" name="Debug" targetName="6-Channel Looper"/>
-        <CONFIGURATION isDebug="0" name="Release" targetName="6-Channel Looper"/>
+        <CONFIGURATION isDebug="1" name="Debug" targetName="chief"
+                       headerPath="C:\Users\PC\Documents\code\asiosdk\common"
+                       libraryPath="C:\Users\PC\Documents\code\asiosdk\common"/>
+        <CONFIGURATION isDebug="0" name="Release" targetName="chief"
+                       headerPath="C:\Users\PC\Documents\code\asiosdk\common"
+                       libraryPath="C:\Users\PC\Documents\code\asiosdk\common"/>
       </CONFIGURATIONS>
       <MODULEPATHS>
         <MODULEPATH id="juce_audio_basics" path="../../JUCE/modules"/>
@@ -87,10 +92,12 @@
         <MODULEPATH id="juce_gui_extra" path="../../JUCE/modules"/>
       </MODULEPATHS>
     </VS2022>
-    <VS2019 targetFolder="Builds/VisualStudio2019">
+    <VS2019 targetFolder="Builds/VisualStudio2019" extraDefs="JUCE_ASIO=1">
       <CONFIGURATIONS>
-        <CONFIGURATION isDebug="1" name="Debug" targetName="6-Channel Looper"/>
-        <CONFIGURATION isDebug="0" name="Release" targetName="6-Channel Looper"/>
+        <CONFIGURATION isDebug="1" name="Debug" targetName="Chief-LP6" headerPath="C:\Users\PC\Documents\code\asiosdk\common"
+                       libraryPath="C:\Users\PC\Documents\code\asiosdk\common"/>
+        <CONFIGURATION isDebug="0" name="Release" targetName="Chief-LP6" headerPath="C:\Users\PC\Documents\code\asiosdk\common"
+                       libraryPath="C:\Users\PC\Documents\code\asiosdk\common"/>
       </CONFIGURATIONS>
       <MODULEPATHS>
         <MODULEPATH id="juce_audio_basics" path="../../JUCE/modules"/>

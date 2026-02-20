@@ -62,6 +62,8 @@ void Metronome::processBlock(float* const* outputChannelData,
     if (!isEnabled.load(std::memory_order_relaxed) || !isPlaying)
     {
         clickSampleCountdown = 0;
+        beatPhaseAccumulator  = 0.0;   // clean state for next start
+        sinePhase             = 0.0;
         return;
     }
 

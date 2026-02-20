@@ -178,8 +178,75 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     clearOutputBuffer(outputChannelData, numOutputChannels, numSamples);
 
     //--- 3. ADVANCE PLAYHEAD ---------------------------------------------------
-    const bool playing = isPlayingFlag.load(std::memory_order_relaxed);
+    bool playing = isPlayingFlag.load(std::memory_order_relaxed);
     loopEngine->processBlock(numSamples, playing);
+
+    //--- 3b. STOP RECORDING IF TRANSPORT IS NOT RUNNING -----------------------
+    // Prevents recording channels from overwriting loop data at a frozen playhead.
+    if (!playing)
+    {
+        for (auto& ch : channels)
+        {
+            if (ch)
+            {
+                const auto cs = ch->getState();
+                if (cs == ChannelState::Recording || cs == ChannelState::Overdubbing)
+                    ch->stopRecording();
+            }
+        }
+
+        // Cancel pending count-in and autostart when transport stops
+        if (countInActive)
+        {
+            countInActive        = false;
+            pendingRecordChannel = -1;
+        }
+        autoStartTriggered = false;
+    }
+
+    //--- 3c. AUTO-START THRESHOLD CHECK ----------------------------------------
+    if (autoStartEnabled.load(std::memory_order_relaxed) && !playing && !autoStartTriggered
+        && !countInActive)
+    {
+        const float threshold = autoStartThresholdLinear.load(std::memory_order_relaxed);
+        float peak = 0.0f;
+        for (int ch = 0; ch < numInputChannels && peak < threshold; ++ch)
+        {
+            if (inputChannelData[ch])
+                for (int s = 0; s < numSamples; ++s)
+                    peak = juce::jmax(peak, std::abs(inputChannelData[ch][s]));
+        }
+
+        if (peak >= threshold)
+        {
+            autoStartTriggered = true;
+            const int activeIdx = activeChannelIndex.load(std::memory_order_relaxed);
+            Command cmd = Command::startRecord(activeIdx);
+            processCommand(cmd);
+            // Re-read the playing flag — StartRecord may have set it
+            playing = isPlayingFlag.load(std::memory_order_relaxed);
+        }
+    }
+
+    //--- 3d. COUNT-IN COUNTDOWN ------------------------------------------------
+    if (countInActive)
+    {
+        countInSamplesRemaining -= numSamples;
+        if (countInSamplesRemaining <= 0)
+        {
+            countInActive = false;
+            if (pendingRecordChannel >= 0 && pendingRecordChannel < 6)
+            {
+                if (auto* ch = channels[pendingRecordChannel].get())
+                {
+                    if (!metronome->getEnabled() && loopEngine->getLoopLength() == 0)
+                        loopEngine->resetPlayhead();
+                    ch->startRecording(false);
+                }
+            }
+            pendingRecordChannel = -1;
+        }
+    }
 
     //--- 4. COLLECT MIDI -------------------------------------------------------
     // Thread-safe: MIDI thread writes via addMessageToQueue(),
@@ -235,6 +302,7 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
     {
         case CommandType::SetBPM:
         {
+            if (isPlayingFlag.load(std::memory_order_relaxed)) { DBG("SetBPM ignored: playing"); break; }
             const double bpm = static_cast<double>(cmd.floatValue);
             loopEngine->setBPM(bpm);
             metronome->setBPM(bpm);
@@ -246,6 +314,7 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
 
         case CommandType::SetBeatsPerLoop:
         {
+            if (isPlayingFlag.load(std::memory_order_relaxed)) { DBG("SetBeatsPerLoop ignored: playing"); break; }
             loopEngine->setBeatsPerLoop(cmd.intValue1);
             // Nur neu berechnen wenn Metronom aktiv (sonst freier Modus)
             if (metronome->getEnabled())
@@ -351,11 +420,29 @@ void AudioEngine::processChannelCommand(const Command& cmd)
     {
         case CommandType::StartRecord:
         {
-            // Freier Modus + noch keine Loop-Länge: Playhead auf 0
-            if (!metronome->getEnabled() && loopEngine->getLoopLength() == 0)
-                loopEngine->resetPlayhead();
+            // Auto-start transport so the playhead advances (needed for count-in + recording)
+            isPlayingFlag.store(true, std::memory_order_release);
 
-            channel->startRecording(false);
+            const int ci = countInBeats.load(std::memory_order_relaxed);
+            if (ci > 0 && !countInActive)
+            {
+                // Count-in phase: transport runs (metronome clicks), recording deferred
+                const double bpm = loopEngine->getBPM();
+                const double spb = (60.0 / juce::jmax(1.0, bpm)) * currentSampleRate;
+                countInSamplesRemaining = static_cast<juce::int64>(
+                    juce::jmax(1, static_cast<int>(ci * spb)));
+                countInActive        = true;
+                pendingRecordChannel = cmd.channelIndex;
+                DBG("Count-in: " + juce::String(ci) + " beat(s) = " +
+                    juce::String(countInSamplesRemaining) + " samples");
+            }
+            else
+            {
+                // Immediate recording
+                if (!metronome->getEnabled() && loopEngine->getLoopLength() == 0)
+                    loopEngine->resetPlayhead();
+                channel->startRecording(false);
+            }
             break;
         }
 
@@ -372,9 +459,13 @@ void AudioEngine::processChannelCommand(const Command& cmd)
                         juce::String(recorded) + " samples (" +
                         juce::String(static_cast<double>(recorded) / currentSampleRate, 2) + "s)");
                 }
+                loopEngine->resetPlayhead();
+                channel->stopRecording();
             }
-            loopEngine->resetPlayhead();
-            channel->stopRecording();
+            else
+            {
+                channel->requestStopAtLoopEnd();
+            }
             break;
         }
 
@@ -386,19 +477,26 @@ void AudioEngine::processChannelCommand(const Command& cmd)
 
         case CommandType::StopPlayback:
         {
-            channel->stopPlayback();
+            if (loopEngine->getLoopLength() == 0)
+                channel->stopPlayback();
+            else
+                channel->requestStopAtLoopEnd();
             break;
         }
 
         case CommandType::StartOverdub:
         {
+            isPlayingFlag.store(true, std::memory_order_release);
             channel->startRecording(true);
             break;
         }
 
         case CommandType::StopOverdub:
         {
-            channel->stopRecording();
+            if (loopEngine->getLoopLength() == 0)
+                channel->stopRecording();
+            else
+                channel->requestStopAtLoopEnd();
             break;
         }
 
@@ -597,6 +695,11 @@ void AudioEngine::loadPluginAsync(int channelIndex,
         DBG("loadPluginAsync: invalid slot " + juce::String(slotIndex));
         return;
     }
+    if (isPlayingFlag.load(std::memory_order_relaxed))
+    {
+        DBG("loadPluginAsync: blocked — engine is playing (Spec §10)");
+        return;
+    }
 
     auto description = pluginHost->findPluginByIdentifier(pluginIdentifier);
     if (description.name.isEmpty())
@@ -666,6 +769,11 @@ void AudioEngine::removePlugin(int channelIndex, int slotIndex)
     if (channelIndex < 0 || channelIndex >= 6) return;
     auto* channel = channels[channelIndex].get();
     if (!channel) return;
+    if (isPlayingFlag.load(std::memory_order_relaxed))
+    {
+        DBG("removePlugin: blocked — engine is playing (Spec §10)");
+        return;
+    }
 
     if (slotIndex == -1 && channel->getType() == ChannelType::VSTi)
     {
@@ -741,4 +849,31 @@ bool AudioEngine::hasAnyRecordings() const
 void AudioEngine::resetSong()
 {
     sendCommand(Command::resetSong());
+}
+
+//==============================================================================
+// Auto-Start (Message Thread)
+//==============================================================================
+
+void AudioEngine::setAutoStart(bool enabled, float thresholdDb)
+{
+    autoStartEnabled.store(enabled, std::memory_order_release);
+    const float linear = juce::Decibels::decibelsToGain(
+        juce::jlimit(-60.0f, 0.0f, thresholdDb));
+    autoStartThresholdLinear.store(linear, std::memory_order_release);
+}
+
+float AudioEngine::getAutoStartThresholdDb() const
+{
+    return juce::Decibels::gainToDecibels(
+        autoStartThresholdLinear.load(std::memory_order_relaxed));
+}
+
+//==============================================================================
+// Count-In (Message Thread)
+//==============================================================================
+
+void AudioEngine::setCountInBeats(int beats)
+{
+    countInBeats.store(juce::jlimit(0, 16, beats), std::memory_order_release);
 }

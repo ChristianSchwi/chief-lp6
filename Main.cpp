@@ -11,10 +11,10 @@ class LooperApplication : public juce::JUCEApplication
 {
 public:
     LooperApplication() {}
-    
-    const juce::String getApplicationName() override 
-    { 
-        return "6-Channel Looper"; 
+
+    const juce::String getApplicationName() override
+    {
+        return "chief";
     }
     
     const juce::String getApplicationVersion() override 

@@ -44,6 +44,7 @@ public:
     void startPlayback();
     void stopPlayback();
     void clearLoop();
+    void requestStopAtLoopEnd();
 
     //==========================================================================
     // Parameters
@@ -126,9 +127,10 @@ protected:
     std::atomic<bool>         loopHasContent {false};
     std::atomic<bool>         muted          {false};
     std::atomic<bool>         solo           {false};
+    std::atomic<bool>         stopPending    {false};
 
     std::atomic<float>       gainLinear  {1.0f};
-    std::atomic<MonitorMode> monitorMode {MonitorMode::AlwaysOn};
+    std::atomic<MonitorMode> monitorMode {MonitorMode::WhenTrackActive};
 
     RoutingConfig routing;
 
@@ -150,6 +152,10 @@ protected:
     int    maxBlockSize {512};
 
     //==========================================================================
+    void checkAndExecutePendingStop(juce::int64 playheadPosition,
+                                    juce::int64 loopLength,
+                                    int numSamples);
+
     void processFXChain(juce::AudioBuffer<float>& buffer,
                         int numSamples,
                         juce::MidiBuffer& midiBuffer);

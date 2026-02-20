@@ -32,9 +32,33 @@ MainComponent::MainComponent()
     addAndMakeVisible(showComponent.get());
 
     // --- Info label ---
-    infoLabel.setJustificationType(juce::Justification::centredRight);
+    infoLabel.setJustificationType(juce::Justification::centredLeft);
     infoLabel.setFont(juce::Font(12.0f));
     addAndMakeVisible(infoLabel);
+
+    // --- Audio settings button ---
+    audioSettingsButton.onClick = [this]
+    {
+        auto* selector = new juce::AudioDeviceSelectorComponent(
+            audioEngine.getDeviceManager(),
+            0, 64,    // min/max input channels
+            0, 64,    // min/max output channels
+            true,     // show MIDI input options
+            true,     // show MIDI output selector
+            false,    // stereo pair buttons
+            false);   // hide advanced options
+        selector->setSize(500, 420);
+
+        juce::DialogWindow::LaunchOptions opts;
+        opts.content.setOwned(selector);
+        opts.dialogTitle                  = "Audio & MIDI Settings";
+        opts.dialogBackgroundColour       = juce::Colours::darkgrey;
+        opts.escapeKeyTriggersCloseButton = true;
+        opts.useNativeTitleBar            = false;
+        opts.resizable                    = true;
+        opts.launchAsync();
+    };
+    addAndMakeVisible(audioSettingsButton);
 
     // --- Logo ---
     logo = juce::ImageCache::getFromMemory(
@@ -70,8 +94,10 @@ void MainComponent::resized()
     // Show/song bar at the bottom — fixed height
     showComponent->setBounds(area.removeFromBottom(36));
 
-    // Info label below channels
-    infoLabel.setBounds(area.removeFromBottom(20).reduced(4, 0));
+    // Info row: label (left) + audio settings button (right)
+    auto infoRow = area.removeFromBottom(26);
+    audioSettingsButton.setBounds(infoRow.removeFromRight(120).reduced(2, 2));
+    infoLabel.setBounds(infoRow.reduced(4, 0));
 
     // Remaining area: transport (left panel) + 6 channel strips
     const int transportWidth = 220;
@@ -109,8 +135,7 @@ void MainComponent::initializeAudio()
         audioEngine.getLoopEngine().calculateLoopLengthFromBPM();
     // else: Loop-Länge = 0 → erste Aufnahme setzt sie (freier Modus)
 
-    // Start playback
-    audioEngine.setPlaying(true);
+    // Transport starts stopped; user must press Play or hit Record on a channel.
 
     infoLabel.setText(
         "Audio: " + juce::String(audioEngine.getSampleRate(), 0) + " Hz  |  " +

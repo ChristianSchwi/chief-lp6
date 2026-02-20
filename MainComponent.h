@@ -41,7 +41,8 @@ private:
     std::array<std::unique_ptr<ChannelStripComponent>, 6> channelStrips;
     std::unique_ptr<ShowComponent> showComponent;
 
-    juce::Label infoLabel;
+    juce::Label      infoLabel;
+    juce::TextButton audioSettingsButton {"Audio Settings"};
     juce::Image logo;
 
     //==========================================================================

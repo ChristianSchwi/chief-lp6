@@ -63,6 +63,17 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     addAndMakeVisible(fxButton);
 
     //--------------------------------------------------------------------------
+    // Monitor mode
+    // Order matches user request: Always On / While Recording / While Active / Always Off
+    monitorModeBox.addItem("Always On",       1);   // MonitorMode::AlwaysOn
+    monitorModeBox.addItem("While Recording", 2);   // MonitorMode::WhileRecording
+    monitorModeBox.addItem("While Active",    3);   // MonitorMode::WhenTrackActive (default)
+    monitorModeBox.addItem("Always Off",      4);   // MonitorMode::Off
+    monitorModeBox.setSelectedId(3, juce::dontSendNotification);
+    monitorModeBox.onChange = [this] { monitorModeChanged(); };
+    addAndMakeVisible(monitorModeBox);
+
+    //--------------------------------------------------------------------------
     // Gain
     gainSlider.setSliderStyle(juce::Slider::LinearVertical);
     gainSlider.setRange(-60.0, 12.0, 0.1);
@@ -136,6 +147,10 @@ void ChannelStripComponent::resized()
     soloButton.setBounds(msRow.reduced(2));
     area.removeFromTop(4);
 
+    // Monitor mode
+    monitorModeBox.setBounds(area.removeFromTop(22));
+    area.removeFromTop(2);
+
     // Gain slider fills remaining space
     gainSlider.setBounds(area);
 }
@@ -167,17 +182,40 @@ void ChannelStripComponent::timerCallback()
     muteButton.setToggleState(channel->isMuted(), juce::dontSendNotification);
     soloButton.setToggleState(channel->isSolo(),  juce::dontSendNotification);
 
-    // State label
-    const auto state = channel->getState();
-    juce::String stateText;
-    switch (state)
+    // Sync monitor mode box
     {
-        case ChannelState::Idle:        stateText = "Idle";      break;
-        case ChannelState::Recording:   stateText = "REC";       break;
-        case ChannelState::Playing:     stateText = "PLAY";      break;
-        case ChannelState::Overdubbing: stateText = "OVERDUB";   break;
+        int id;
+        switch (channel->getMonitorMode())
+        {
+            case MonitorMode::AlwaysOn:        id = 1; break;
+            case MonitorMode::WhileRecording:  id = 2; break;
+            case MonitorMode::WhenTrackActive: id = 3; break;
+            case MonitorMode::Off:             id = 4; break;
+            default:                           id = 3; break;
+        }
+        if (monitorModeBox.getSelectedId() != id)
+            monitorModeBox.setSelectedId(id, juce::dontSendNotification);
     }
-    stateLabel.setText(stateText, juce::dontSendNotification);
+
+    // State label — show MIDI LEARN if this channel is being assigned
+    auto& mlm = audioEngine.getMidiLearnManager();
+    if (mlm.isLearning() && mlm.getLearningTarget().channelIndex == channelIndex)
+    {
+        stateLabel.setText("MIDI LEARN", juce::dontSendNotification);
+    }
+    else
+    {
+        const auto state = channel->getState();
+        juce::String stateText;
+        switch (state)
+        {
+            case ChannelState::Idle:        stateText = "Idle";    break;
+            case ChannelState::Recording:   stateText = "REC";     break;
+            case ChannelState::Playing:     stateText = "PLAY";    break;
+            case ChannelState::Overdubbing: stateText = "OVERDUB"; break;
+        }
+        stateLabel.setText(stateText, juce::dontSendNotification);
+    }
 
     // Repaint border when active state changes
     repaint();
@@ -197,18 +235,23 @@ void ChannelStripComponent::updateMainButton()
     juce::Colour colour;
 
     // Priority (Spec Abschnitt 5):
-    // 1. Global overdub ON  → toggle overdub on this channel
-    // 2. Loop empty         → Record
-    // 3. Loop exists, idle  → Play
-    // 4. Loop exists, playing → Stop
-    // 5. Recording          → Stop Rec
+    // Overdub mode redirects Playing→Overdub; all other states behave normally.
+    // 1. Overdub mode ON + Playing  → start Overdub
+    // 2. Overdubbing                → Stop Overdub
+    // 3. Recording                  → Stop Rec
+    // 4. Loop empty                 → Record
+    // 5. Loop exists, idle          → Play
+    // 6. Loop exists, playing       → Stop
 
-    if (overdubMode)
+    if (overdubMode && state == ChannelState::Playing)
     {
-        if (state == ChannelState::Overdubbing)
-            { label = "STOP OVD"; colour = juce::Colours::darkorange; }
-        else
-            { label = "OVERDUB";  colour = juce::Colours::orange; }
+        label  = "OVERDUB";
+        colour = juce::Colours::orange;
+    }
+    else if (state == ChannelState::Overdubbing)
+    {
+        label  = "STOP OVD";
+        colour = juce::Colours::darkorange;
     }
     else if (state == ChannelState::Recording)
     {
@@ -247,17 +290,17 @@ void ChannelStripComponent::mainButtonClicked()
     // Set as active channel on button press
     audioEngine.setActiveChannel(channelIndex);
 
-    if (overdubMode)
+    if (overdubMode && state == ChannelState::Playing)
     {
+        // Overdub mode: playing → start overdub instead of stopping
         Command cmd;
-        if (state == ChannelState::Overdubbing)
-            cmd = Command::stopRecord(channelIndex);
-        else
-        {
-            cmd.type         = CommandType::StartOverdub;
-            cmd.channelIndex = channelIndex;
-        }
+        cmd.type         = CommandType::StartOverdub;
+        cmd.channelIndex = channelIndex;
         audioEngine.sendCommand(cmd);
+    }
+    else if (state == ChannelState::Overdubbing)
+    {
+        audioEngine.sendCommand(Command::stopRecord(channelIndex));
     }
     else if (state == ChannelState::Recording)
     {
@@ -330,6 +373,24 @@ void ChannelStripComponent::gainChanged()
         Command::setGain(channelIndex, static_cast<float>(gainSlider.getValue())));
 }
 
+void ChannelStripComponent::monitorModeChanged()
+{
+    MonitorMode mode;
+    switch (monitorModeBox.getSelectedId())
+    {
+        case 1: mode = MonitorMode::AlwaysOn;        break;
+        case 2: mode = MonitorMode::WhileRecording;  break;
+        case 3: mode = MonitorMode::WhenTrackActive; break;
+        case 4: mode = MonitorMode::Off;             break;
+        default: return;
+    }
+    Command cmd;
+    cmd.type         = CommandType::SetMonitorMode;
+    cmd.channelIndex = channelIndex;
+    cmd.intValue1    = static_cast<int>(mode);
+    audioEngine.sendCommand(cmd);
+}
+
 void ChannelStripComponent::showContextMenu(const juce::MouseEvent&)
 {
     juce::PopupMenu menu;
@@ -351,9 +412,17 @@ void ChannelStripComponent::showContextMenu(const juce::MouseEvent&)
     });
 }
 
-void ChannelStripComponent::showMidiLearnMenu(juce::Component* /*target*/)
+void ChannelStripComponent::showMidiLearnMenu(juce::Component* target)
 {
-    // MidiLearnManager integration — placeholder
-    // Full implementation ties into MidiLearnManager::startLearning()
-    DBG("MIDI Learn requested for channel " + juce::String(channelIndex));
+    MidiControlTarget midiTarget;
+
+    if      (target == &mainButton) midiTarget = MidiControlTarget::Record;
+    else if (target == &gainSlider) midiTarget = MidiControlTarget::Gain;
+    else if (target == &muteButton) midiTarget = MidiControlTarget::Mute;
+    else if (target == &soloButton) midiTarget = MidiControlTarget::Solo;
+    else return;
+
+    audioEngine.getMidiLearnManager().startLearning(channelIndex, midiTarget);
+    DBG("MIDI Learn started: ch" + juce::String(channelIndex) +
+        " target " + MidiLearnManager::targetName(midiTarget));
 }

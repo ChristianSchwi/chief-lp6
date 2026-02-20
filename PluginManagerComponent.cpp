@@ -149,16 +149,20 @@ PluginManagerComponent::PluginManagerComponent(AudioEngine& engine, int channelI
     vstiTypeButton.onClick = [this] { setChannelType(ChannelType::VSTi); };
     addAndMakeVisible(vstiTypeButton);
 
-    // Scan-Button
+    // Scan-Button — always visible so the user can rescan after installing new plugins
     scanButton.onClick = [this]
     {
+        scanButton.setEnabled(false);
+        scanButton.setButtonText("Scanning...");
         audioEngine.getPluginHost().scanForPlugins(false);
+        scanButton.setButtonText("Rescan Plugins");
+        scanButton.setEnabled(true);
         rebuildSlots();
         setSize(kWidth, calcHeight());
     };
-
-    if (audioEngine.getPluginHost().getNumPlugins() == 0)
-        addAndMakeVisible(scanButton);
+    scanButton.setButtonText(audioEngine.getPluginHost().getNumPlugins() == 0
+                             ? "Scan for Plugins" : "Rescan Plugins");
+    addAndMakeVisible(scanButton);
 
     rebuildSlots();
     setSize(kWidth, calcHeight());
@@ -203,13 +207,12 @@ int PluginManagerComponent::calcHeight() const
 {
     int rows = 3;         // Immer 3 FX-Slots
     if (isVSTi) ++rows;   // VSTi-Slot
-    const int hasNoPlugins = (audioEngine.getPluginHost().getNumPlugins() == 0) ? 1 : 0;
 
     return 10              // Top-Padding
          + 28              // Typ-Buttons
          + 6               // Abstand
+         + 32              // Scan button (always present)
          + rows * (kRowH + 4)
-         + hasNoPlugins * 34
          + 10;             // Bottom-Padding
 }
 
@@ -246,12 +249,9 @@ void PluginManagerComponent::resized()
 
     area.removeFromTop(6);
 
-    // Scan-Button
-    if (audioEngine.getPluginHost().getNumPlugins() == 0)
-    {
-        scanButton.setBounds(area.removeFromTop(28));
-        area.removeFromTop(4);
-    }
+    // Scan-Button (always in layout)
+    scanButton.setBounds(area.removeFromTop(28));
+    area.removeFromTop(4);
 
     // VSTi-Slot
     if (vstiSlot)

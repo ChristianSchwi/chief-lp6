@@ -11,6 +11,13 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     addAndMakeVisible(playStopButton);
 
     //--------------------------------------------------------------------------
+    // Overdub mode toggle
+    overdubButton.setToggleState(audioEngine.isInOverdubMode(), juce::dontSendNotification);
+    overdubButton.setColour(juce::ToggleButton::tickColourId, juce::Colours::orange);
+    overdubButton.onClick = [this] { overdubModeChanged(); };
+    addAndMakeVisible(overdubButton);
+
+    //--------------------------------------------------------------------------
     // BPM
     bpmLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(bpmLabel);
@@ -62,6 +69,36 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     // FIX: populateMetroOutputBox() wird NICHT hier aufgerufen —
     //      Audio ist zu diesem Zeitpunkt noch nicht initialisiert.
     //      Stattdessen: refreshAfterAudioInit() aus MainComponent aufrufen.
+
+    //--------------------------------------------------------------------------
+    // Auto-Start
+    autoStartButton.setToggleState(false, juce::dontSendNotification);
+    autoStartButton.setColour(juce::ToggleButton::tickColourId, juce::Colours::cyan);
+    autoStartButton.onClick = [this] { autoStartChanged(); };
+    addAndMakeVisible(autoStartButton);
+
+    autoStartThreshLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(autoStartThreshLabel);
+
+    autoStartSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    autoStartSlider.setRange(-60.0, 0.0, 0.5);
+    autoStartSlider.setValue(-30.0, juce::dontSendNotification);
+    autoStartSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    autoStartSlider.setTextValueSuffix(" dB");
+    autoStartSlider.onValueChange = [this] { autoStartThresholdChanged(); };
+    addAndMakeVisible(autoStartSlider);
+
+    //--------------------------------------------------------------------------
+    // Count-In
+    countInLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(countInLabel);
+
+    countInBox.addItem("0 (Off)", 1);
+    for (int i = 1; i <= 16; ++i)
+        countInBox.addItem(juce::String(i) + (i == 1 ? " beat" : " beats"), i + 1);
+    countInBox.setSelectedId(1, juce::dontSendNotification);
+    countInBox.onChange = [this] { countInChanged(); };
+    addAndMakeVisible(countInBox);
 
     //--------------------------------------------------------------------------
     // Reset Song
@@ -118,6 +155,27 @@ void TransportComponent::resized()
     playStopButton.setBounds(area.removeFromTop(36).reduced(0, 4));
     area.removeFromTop(4);
 
+    // Overdub mode
+    overdubButton.setBounds(area.removeFromTop(24));
+    area.removeFromTop(4);
+
+    // Auto-Start
+    autoStartButton.setBounds(area.removeFromTop(24));
+    {
+        auto row = area.removeFromTop(26);
+        autoStartThreshLabel.setBounds(row.removeFromLeft(72));
+        autoStartSlider.setBounds(row);
+    }
+    area.removeFromTop(6);
+
+    // Count-In
+    {
+        auto row = area.removeFromTop(26);
+        countInLabel.setBounds(row.removeFromLeft(72));
+        countInBox.setBounds(row);
+    }
+    area.removeFromTop(6);
+
     // BPM
     auto row = area.removeFromTop(28);
     bpmLabel .setBounds(row.removeFromLeft(55));
@@ -171,6 +229,11 @@ void TransportComponent::updateDisplay()
     playStopButton.setButtonText(playing ? "Stop" : "Play");
     playStopButton.setColour(juce::TextButton::buttonColourId,
                              playing ? juce::Colours::red : juce::Colours::green);
+
+    bpmSlider  .setEnabled(!playing);
+    beatsSlider.setEnabled(!playing);
+
+    overdubButton.setToggleState(audioEngine.isInOverdubMode(), juce::dontSendNotification);
 
     // Modus-Anzeige
     const bool metroActive = audioEngine.getMetronome().getEnabled();
@@ -227,6 +290,11 @@ void TransportComponent::playStopClicked()
     audioEngine.setPlaying(!audioEngine.isPlaying());
 }
 
+void TransportComponent::overdubModeChanged()
+{
+    audioEngine.setOverdubMode(overdubButton.getToggleState());
+}
+
 void TransportComponent::bpmChanged()
 {
     Command cmd;
@@ -276,6 +344,24 @@ void TransportComponent::metroOutputChanged()
     if (id <= 0) return;
     const int L = (id - 1) * 2;
     audioEngine.setMetronomeOutput(L, L + 1);
+}
+
+void TransportComponent::autoStartChanged()
+{
+    audioEngine.setAutoStart(autoStartButton.getToggleState(),
+                             static_cast<float>(autoStartSlider.getValue()));
+}
+
+void TransportComponent::autoStartThresholdChanged()
+{
+    audioEngine.setAutoStart(autoStartButton.getToggleState(),
+                             static_cast<float>(autoStartSlider.getValue()));
+}
+
+void TransportComponent::countInChanged()
+{
+    // selectedId: 1 → 0 beats, 2 → 1 beat, ..., 17 → 16 beats
+    audioEngine.setCountInBeats(countInBox.getSelectedId() - 1);
 }
 
 void TransportComponent::resetSongClicked()

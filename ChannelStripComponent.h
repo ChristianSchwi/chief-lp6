@@ -43,6 +43,7 @@ private:
     juce::Slider     gainSlider;
     juce::TextButton muteButton  {"M"};
     juce::TextButton soloButton  {"S"};
+    juce::ComboBox   monitorModeBox;
 
     // Display
     juce::Label      channelLabel;
@@ -58,6 +59,7 @@ private:
     void soloClicked();
     void gainChanged();
 
+    void monitorModeChanged();
     void showContextMenu(const juce::MouseEvent& e);
     void showMidiLearnMenu(juce::Component* target);
 

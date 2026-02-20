@@ -127,11 +127,13 @@ void VSTiChannel::processBlock(const float* const* inputChannelData,
                                int numInputChannels,
                                int numOutputChannels)
 {
+    checkAndExecutePendingStop(playheadPosition, loopLength, numSamples);
+
     // Clear working buffer
     workingBuffer.clear(0, numSamples);
     vstiOutputBuffer.clear(0, numSamples);
     filteredMidiBuffer.clear();
-    
+
     // Check if muted
     const bool isMutedNow = muted.load(std::memory_order_relaxed);
     const ChannelState currentState = state.load(std::memory_order_relaxed);
@@ -168,9 +170,10 @@ void VSTiChannel::processBlock(const float* const* inputChannelData,
     //==========================================================================
     // 5. RECORDING / OVERDUBBING
     //==========================================================================
-    if (currentState == ChannelState::Recording && loopLength > 0)
+    if (currentState == ChannelState::Recording)
     {
-        // First recording pass - replace any existing content
+        // First recording pass - replace any existing content.
+        // loopLength may still be 0 in free mode; recordToLoop guards against invalid state.
         recordToLoop(workingBuffer, playheadPosition, numSamples, false);
     }
     else if (currentState == ChannelState::Overdubbing && loopLength > 0)

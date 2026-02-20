@@ -118,6 +118,23 @@ public:
     void emergencyStop();
 
     //==========================================================================
+    // Auto-Start (input threshold trigger)
+    //==========================================================================
+
+    /** Enable/disable auto-start and set the trigger threshold in dB. */
+    void  setAutoStart(bool enabled, float thresholdDb);
+    bool  isAutoStartEnabled()    const { return autoStartEnabled.load(std::memory_order_relaxed); }
+    float getAutoStartThresholdDb() const;
+
+    //==========================================================================
+    // Count-In
+    //==========================================================================
+
+    /** Set number of count-in beats before recording actually starts (0 = off). */
+    void setCountInBeats(int beats);
+    int  getCountInBeats() const { return countInBeats.load(std::memory_order_relaxed); }
+
+    //==========================================================================
     // Loop Engine
     //==========================================================================
 
@@ -211,10 +228,21 @@ private:
     int    currentBufferSize {512};
 
     // Atomics (shared between threads)
-    std::atomic<bool> isPlayingFlag  {false};
-    std::atomic<bool> overdubMode    {false};
-    std::atomic<bool> isInitialised  {false};
-    std::atomic<int>  activeChannelIndex {0};
+    std::atomic<bool>  isPlayingFlag        {false};
+    std::atomic<bool>  overdubMode          {false};
+    std::atomic<bool>  isInitialised        {false};
+    std::atomic<int>   activeChannelIndex   {0};
+
+    // Auto-start
+    std::atomic<bool>  autoStartEnabled         {false};
+    std::atomic<float> autoStartThresholdLinear {0.031623f};   // ~-30 dB
+    bool               autoStartTriggered       {false};       // audio thread only
+
+    // Count-in
+    std::atomic<int>  countInBeats            {0};
+    bool              countInActive           {false};         // audio thread only
+    juce::int64       countInSamplesRemaining {0};             // audio thread only
+    int               pendingRecordChannel    {-1};            // audio thread only
 
     // Working buffers (audio thread only)
     juce::AudioBuffer<float> inputBuffer;
