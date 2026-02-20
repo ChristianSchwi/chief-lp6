@@ -10,67 +10,89 @@
 /**
  * @file ChannelStripComponent.h
  * @brief GUI component for a single channel
- * 
- * Displays:
- * - Channel type (Audio/VSTi)
- * - Record/Play/Overdub buttons
- * - Gain fader
- * - Mute/Solo buttons
- * - Channel state indicator
+ *
+ * Main button behaviour (Spec Abschnitt 5):
+ *   Loop leer              → press starts Recording
+ *   Loop vorhanden, idle   → press starts Playback
+ *   Loop vorhanden, playing→ press stops Playback
+ *   Global overdub active  → press toggles Overdub on this channel
+ *
+ * Secondary buttons: CLR, I/O, FX
  */
 
 //==============================================================================
 class ChannelStripComponent : public juce::Component,
-                               private juce::Timer
+                              private juce::Timer
 {
 public:
     ChannelStripComponent(AudioEngine& engine, int channelIndex);
     ~ChannelStripComponent() override;
-    
+
     void paint(juce::Graphics& g) override;
     void resized() override;
-    
+
     void updateFromChannel();
-    
+
 private:
     AudioEngine& audioEngine;
-    int channelIdx;
-    
+    int          channelIdx;
+
+    //==========================================================================
     // UI Components
+
+    // Channel number + state
     juce::Label channelLabel;
     juce::Label stateLabel;
-    
-    juce::TextButton recordButton{"REC"};
-    juce::TextButton playButton{"PLAY"};
-    juce::TextButton overdubButton{"OVDB"};
-    juce::TextButton clearButton{"CLR"};
+
+    // ---- Main button (context-sensitive) ----
+    juce::TextButton mainButton{"REC"};
+
+    // ---- Secondary buttons ----
+    juce::TextButton clearButton  {"CLR"};
     juce::TextButton routingButton{"I/O"};
-    juce::TextButton fxButton{"FX"};
-    
+    juce::TextButton fxButton     {"FX"};
+
+    // ---- Gain ----
+    juce::Label  gainLabel;
     juce::Slider gainSlider;
-    juce::Label gainLabel;
-    
+
+    // ---- Mute / Solo ----
     juce::ToggleButton muteButton{"M"};
     juce::ToggleButton soloButton{"S"};
-    
+
+    // ---- Monitor mode ----
     juce::ComboBox monitorModeBox;
 
-    // Plugin strip
+    // ---- Plugin strip (embedded) ----
     PluginManagerComponent pluginStrip;
-    
-    // State
-    ChannelState currentState{ChannelState::Idle};
-    bool hasLoop{false};
-    
+
+    //==========================================================================
+    // Cached state (updated by timer on message thread)
+    ChannelState currentState {ChannelState::Idle};
+    bool         hasLoop      {false};
+
+    //==========================================================================
+    // Timer
     void timerCallback() override;
-    void mouseDown(const juce::MouseEvent& e) override;
-    void buttonClicked(juce::Button* button);
+
+    //==========================================================================
+    // Main button logic
+    void mainButtonClicked();
+    void updateMainButton();   // Refreshes label + colour to reflect current context
+
+    //==========================================================================
+    // Other handlers
+    void clearClicked();
     void gainChanged();
     void monitorModeChanged();
+    void muteClicked();
+    void soloClicked();
 
-    // MIDI-Learn Kontextmenü
+    //==========================================================================
+    // MIDI-Learn context menu
+    void mouseDown(const juce::MouseEvent& e) override;
     void showMidiContextMenu(juce::Component* control, MidiControlTarget target);
     juce::String getMidiAssignmentLabel(MidiControlTarget target) const;
-    
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChannelStripComponent)
 };

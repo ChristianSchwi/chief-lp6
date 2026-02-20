@@ -1,0 +1,332 @@
+Prompt beginnt hier:
+Du sollst eine vollständig funktionsfähige Standalone Desktop Anwendung in C++ mit dem Framework JUCE implementieren.
+Es handelt sich um einen 6-Kanal Software Looper mit integrierter VST/VSTi Hosting Funktion.
+Bevor du Code schreibst, sollst du:
+Eine klare Architektur beschreiben
+Die Kernklassen definieren
+Threading-Strategie mit Diagramm erklären
+Datenfluss-Diagramm erstellen
+Edge Cases und Fehlerbehandlung dokumentieren
+Danach schrittweise Code generieren.
+Die Implementierung muss deterministisch, thread-safe und audio-thread-konform sein.
+1. Anwendung
+Standalone Desktop App (kein Plugin)
+Nutzung von juce::AudioDeviceManager
+Keine Host-Synchronisation
+Interne Verarbeitung: 32-bit float
+Maximale Sample Rate: 96 kHz
+Timeline vollständig samplebasiert (int64)
+Keine Mutex oder Speicherallokation im Audio-Thread
+Performance-Anforderungen:
+Ziel-Latenz: <5ms bei 512 Sample Buffer
+CPU-Last: <30% auf Intel i5 @ 96kHz (6 Kanäle aktiv, je 3 Plugins)
+RAM: Loop-Buffer vorallokiert für max. 10 Minuten @ 96kHz Stereo pro Kanal
+2. Globale Loop Engine
+Es existiert eine globale Loop-Länge in Samples.
+Diese wird bestimmt durch:
+A) Erste beendete Aufnahme
+B) Feste Loop-Länge über Metronom (wenn aktiviert)
+Formel bei Metronom-Vorgabe:
+loopLengthSamples = beats * (60.0 / bpm) * sampleRate
+Regeln:
+Alle 6 Kanäle haben exakt gleiche Länge
+Keine Drift
+Kein Time-Stretching
+Kein Resampling
+Phasenstarre Wiedergabe
+Quantisierung:
+Loop-Start: Beat-quantisiert (wenn Metronom aktiv), sonst sofort
+Loop-Stop: Immer am Loop-Ende (keine harten Cuts)
+Overdub-Start: Beat-quantisiert oder sofort (User-Einstellung)
+3. Kanäle (6 Stück, Stereo)
+Jeder Kanal ist entweder:
+Audio-Kanal
+VSTi-Kanal
+Typwechsel löscht Loop und Plugins.
+Buffer-Verwaltung:
+Loop-Buffer wird bei Song-Load vorallokiert
+Größe: loopLengthSamples * 2 (Stereo) * sizeof(float)
+Mono-Input wird auf Stereo dupliziert
+3.1 Audio/MIDI-Routing
+Audio-Routing (Audio-Kanäle)
+Pro Audio-Kanal:
+Frei wählbares Input-Paar (Stereo oder Mono)
+Frei wählbares Output-Paar (Stereo)
+Input-Auswahl:
+Dropdown: "Input 1 (Mono)", "Input 1/2 (Stereo)", "Input 3/4 (Stereo)", ...
+Bei Mono-Auswahl: Signal wird auf beide Stereo-Kanäle dupliziert
+Anzahl verfügbarer Inputs abhängig von Audio-Interface
+Output-Auswahl:
+Dropdown: "Output 1/2", "Output 3/4", "Output 5/6", ...
+Mehrere Kanäle können auf gleichen Output geroutet werden (Summe)
+VSTi-Kanäle:
+Haben keinen Audio-Input (nur MIDI)
+Haben Output-Routing (wie Audio-Kanäle)
+MIDI-Routing
+Globale MIDI-Einstellungen:
+Ein MIDI-Input-Device für gesamte Anwendung
+Device-Auswahl im Settings-Menü
+Pro VSTi-Kanal:
+Optional: MIDI-Channel-Filter (1-16 oder "All Channels")
+Default: "All Channels"
+MIDI-Learning:
+Verwendet das global gewählte MIDI-Device
+Kein Channel-Filter (lernt alle Channels)
+Implementierung
+// Pro Audio-Kanal
+struct AudioChannelRouting {
+    int inputChannelLeft;   // -1 = kein Input (für VSTi)
+    int inputChannelRight;  // -1 = Mono (dupliziere Left)
+    int outputChannelLeft;
+    int outputChannelRight;
+};
+
+// Pro VSTi-Kanal
+struct VSTiChannelRouting {
+    int midiChannelFilter;  // 0 = All, 1-16 = specific channel
+    int outputChannelLeft;
+    int outputChannelRight;
+};
+
+// Im Audio-Callback (Audio Input)
+if (inputChannelRight == -1) {
+    // Mono: dupliziere Input
+    channelBuffer.copyFrom(0, 0, inputBuffer, inputChannelLeft, numSamples);
+    channelBuffer.copyFrom(1, 0, inputBuffer, inputChannelLeft, numSamples);
+} else {
+    // Stereo
+    channelBuffer.copyFrom(0, 0, inputBuffer, inputChannelLeft, numSamples);
+    channelBuffer.copyFrom(1, 0, inputBuffer, inputChannelRight, numSamples);
+}
+
+// Im Audio-Callback (Output)
+outputBuffer.addFrom(outputChannelLeft, 0, channelBuffer, 0, numSamples, gain);
+outputBuffer.addFrom(outputChannelRight, 0, channelBuffer, 1, numSamples, gain);
+Persistenz
+Input/Output-Routing wird pro Song gespeichert
+Defaults:
+Audio-Kanäle: Input 1/2, Output 1/2
+VSTi-Kanäle: kein Input, Output 1/2, MIDI Channel "All"
+Edge Cases (Routing)
+Situation
+Verhalten
+Song referenziert Input 5/6, aber Interface hat nur 2 Inputs
+Fallback auf Input 1/2, Warnung
+Song referenziert Output 7/8, aber Interface hat nur 2 Outputs
+Fallback auf Output 1/2, Warnung
+Audio-Device-Wechsel (weniger Kanäle)
+Routing wird angepasst, Warnung
+Mehrere Kanäle auf gleichem Output
+Summierung (erlaubt, kann clippen)
+MIDI-Device nicht verfügbar
+VSTi-Kanäle stumm, Warnung
+GUI (Routing)
+Routing-Dropdowns im Kanal-Kontextmenü oder Kanal-Header
+Live-Änderung möglich (wird über Command-FIFO an Audio-Thread gesendet)
+Visuelle Anzeige:
+Input-Meter zeigt gewählten Input-Pegel
+Output-Zuordnung farblich gekennzeichnet
+4. Signalfluss
+Audio-Kanal
+Input (wählbar)
+→ 3 Insert FX Slots (VST)
+→ Monitoring (post FX)
+→ Recorder
+→ Loop Buffer
+→ Playback Gain
+→ Output (wählbar)
+Insert FX wirken destruktiv auf Aufnahme.
+VSTi-Kanal
+MIDI Input (global, optional Channel-Filter)
+→ VSTi
+→ 3 Insert FX Slots
+→ Split:
+   A) Live Monitoring (immer aktiv)
+   B) Recorder (nur bei Record/Overdub)
+
+Loop Playback
+→ Playback Gain
+→ Output (wählbar)
+VSTi bleibt dauerhaft aktiv für:
+Overdub
+Live Jam über Loop
+MIDI-Timing:
+MIDI-Events werden sample-genau auf Audio-Buffer gemappt
+Verwendung von MidiBuffer::addEvent(sample, message)
+Keine MIDI-Quantisierung (außer bei Loop-Start wenn aktiviert)
+Overdub Mischformel:
+loopSample = loopSample + newSample
+Clipping ist erlaubt. Keine automatische Gain-Kompensation.
+5. Kanalsteuerung
+Pro Kanal:
+1 Hauptbutton
+1 Gain Regler
+1 Monitoring Button
+3 FX Slots
+Kontextmenü (mit Routing-Einstellungen)
+Hauptbutton Verhalten:
+Wenn Loop leer → Record
+Wenn Loop vorhanden → Play/Stop
+Wenn globaler Overdub aktiv → Overdub Start/Stop
+Overdub auf mehreren Kanälen gleichzeitig möglich.
+6. Monitoring Modi
+Always On
+Only While Recording
+Only When Track Active
+Monitoring erfolgt post FX und wird mit aufgenommen.
+7. Spur Aktivierung
+Spur wird aktiv durch:
+Anklicken
+Next Track Button
+Previous Track Button
+Navigation zyklisch.
+Next/Previous MIDI-mappbar.
+8. MIDI Learning (global)
+Rechtsklick auf Control → MIDI Learn
+Unterstützt: CC, Note On
+Mapping ist global gespeichert (nicht pro Song)
+Speicherung in separater midi-mappings.json
+9. Metronom
+Sinusgenerator
+Samplegenau
+BPM-basiert
+Kein Taktmaß
+Keine Betonung
+Nicht in Loop aufgenommen
+Frei wählbarer Ausgangskanal (Output 1/2, 3/4, ...)
+Optional:
+Feste Loop-Länge in Beats
+Einschränkungen:
+BPM darf nur im gestoppten Zustand geändert werden
+Sample-Rate-Wechsel: Metronom wird neu initialisiert
+10. Plugin Hosting
+Nutzung von AudioPluginFormatManager
+VST3 Support
+Plugins laufen im Audio-Thread
+Plugin Loading nur im gestoppten Zustand
+Plugin State Speicherung via getStateInformation()
+Speicherung Base64 codiert in JSON
+Plugin-Crash-Handling:
+Wenn Plugin im Audio-Callback crasht → Plugin wird deaktiviert
+Audio-Prozessierung läuft mit Bypass weiter
+User erhält Fehlermeldung im Message-Thread
+Song bleibt ladbar (Plugin wird übersprungen)
+11. Show & Song System
+Eine Show enthält mehrere Songs.
+Ein Song speichert:
+6 Kanäle (Kanaltyp, Routing, Gain)
+Input/Output-Routing pro Kanal
+Insert FX + States (Base64)
+Loop-Länge
+Loop Audio (Referenz auf .loop Dateien)
+Monitoring Modi
+Metronom Einstellungen (inkl. Output-Routing)
+MIDI-Channel-Filter (VSTi-Kanäle)
+Speicherformat:
+song.json (Metadaten)
+channel_1.loop bis channel_6.loop (32-bit float, interleaved stereo)
+JSON-Versioning:
+{
+  "format_version": "1.0.0",
+  "song_name": "...",
+  "channels": [...]
+}
+Bei inkompatiblen Versionen: Warnung + Best-Effort-Loading.
+Fehlende .loop-Dateien:
+Song lädt trotzdem
+Betroffener Kanal ist leer
+User erhält Warnung: "Loop-Datei fehlt: channel_3.loop"
+12. Songwechsel
+Beim Songwechsel:
+Audio-Engine in Pause (kein Stop)
+Loops stoppen
+Plugins sauber deinstanziieren (releaseResources())
+Loop Buffer neu laden
+Plugins neu instanziieren
+Metronom reset
+Routing aktualisieren
+Audio-Engine fortsetzen
+Audio-Device bleibt aktiv (keine Unterbrechung).
+Sample-Rate-Wechsel während Laufzeit:
+Nur im gestoppten Zustand erlaubt
+Alle Loops werden neu allokiert (alte Samples werden verworfen)
+Metronom-Loop-Länge wird neu berechnet
+13. Threading-Strategie
+Audio-Thread (Real-Time)
+Nur: Audio-Prozessierung, Plugin-Callbacks
+Verboten: Allocations, File-I/O, Mutex, GUI-Calls
+Message-Thread (GUI)
+GUI-Updates
+Plugin-Loading/Unloading
+File-I/O (Song Save/Load)
+MIDI-Learning
+Routing-Änderungen (werden an Audio-Thread gesendet)
+Shared State
+Lock-Free FIFO für Commands (GUI → Audio)
+Atomics für einfache Flags (Play/Stop, Mute)
+Triple-Buffering für Plugin-State-Updates
+Beispiel Command-System:
+enum CommandType { 
+    StartRecord, 
+    StopPlayback, 
+    SetGain, 
+    SetRouting,
+    ... 
+};
+struct Command { 
+    CommandType type; 
+    int channel; 
+    float value; 
+    int param1;  // z.B. inputChannelLeft
+    int param2;  // z.B. inputChannelRight
+};
+juce::AbstractFifo commandFifo;
+14. Edge Cases & Fehlerbehandlung
+Situation
+Verhalten
+Plugin-Crash im Audio-Callback
+Plugin bypass, Song läuft weiter
+Audio-Device Fehler
+Fallback auf Default-Device, User-Warnung
+Sample-Rate-Wechsel (Runtime)
+Nur wenn gestoppt, sonst Warnung
+Buffer-Overrun
+Samples werden verworfen, Log-Eintrag
+Gelöschte .loop-Datei
+Song lädt, Kanal leer, Warnung
+Plugin-File nicht gefunden
+Song lädt, Slot leer, Warnung mit Plugin-Name
+Overdub Buffer voll
+Clipping (erlaubt), optional Warnung
+Metronom BPM-Änderung während Play
+Änderung wird ignoriert, User-Feedback
+Song referenziert nicht existierende I/O
+Fallback auf Output 1/2, Warnung
+MIDI-Device nicht verfügbar
+VSTi stumm, Warnung, weiter lauffähig
+Mehrere Kanäle → gleicher Output
+Summierung (kann clippen)
+15. Nicht enthalten
+Kein WAV Export
+Kein Undo
+Keine Automation
+Keine Latenzkompensation
+Kein Time-Stretching
+Keine MIDI-Clip-Bearbeitung
+Kein individuelles Tempo pro Kanal
+Implementierung
+Implementiere das Projekt strukturiert und sauber getrennt in:
+Audio Engine (Real-Time Core)
+Channel Class (Audio + VSTi, mit Routing)
+Loop Engine (Buffer-Management, Sync)
+Plugin Host Wrapper (VST3-Integration)
+Song / Show Manager (Persistenz, JSON)
+GUI Layer (JUCE Components, Routing-UI)
+Command System (Thread-Safe Communication)
+Beginne mit:
+Architektur-Diagramm (Komponenten + Abhängigkeiten)
+Threading-Diagramm (Threads + Kommunikation)
+Datenfluss-Diagramm (Audio-Signal + MIDI + Routing)
+Klassenstruktur (Core-Klassen + Interfaces)
+Danach schrittweise Code für jedes Modul.
+Prompt Ende

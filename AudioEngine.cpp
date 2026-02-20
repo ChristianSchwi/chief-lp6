@@ -9,7 +9,9 @@ AudioEngine::AudioEngine()
     loopEngine       = std::make_unique<LoopEngine>();
     pluginHost       = std::make_unique<PluginHostWrapper>();
     midiLearnManager = std::make_unique<MidiLearnManager>(*this);
-    
+    metronome = std::make_unique<Metronome>();
+
+
     // Create 6 audio channels (default to Audio type)
     for (int i = 0; i < 6; ++i)
     {
@@ -129,6 +131,10 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     
     // Configure loop engine
     loopEngine->setSampleRate(currentSampleRate);
+
+    metronome->setBPM(loopEngine->getBPM());
+    metronome->prepareToPlay(currentSampleRate);
+
     
     // Pre-allocate working buffers
     inputBuffer.setSize(numInputChannels, currentBufferSize * 2);  // Double for safety
@@ -145,7 +151,7 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
             channel->prepareToPlay(currentSampleRate, currentBufferSize, maxLoopLengthSamples);
         }
     }
-    
+
     DBG("Audio device about to start:");
     DBG("  Sample Rate: " + juce::String(currentSampleRate) + " Hz");
     DBG("  Buffer Size: " + juce::String(currentBufferSize) + " samples");
@@ -239,7 +245,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     //==============================================================================
     // 5. GENERATE METRONOME (if enabled)
     //==============================================================================
-    // TODO: Phase 6 - Metronome generation
+    metronome->processBlock(outputChannelData,
+        numOutputChannels,
+        numSamples,
+        playheadPos,
+        playing);
     
     //==============================================================================
     // UPDATE DIAGNOSTICS
@@ -272,6 +282,7 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
         {
             const double bpm = static_cast<double>(cmd.floatValue);
             loopEngine->setBPM(bpm);
+            metronome->setBPM(bpm);  // ← hinzufügen
             break;
         }
         
@@ -314,6 +325,18 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
             // TODO: Stop all channels
             break;
         }
+
+        case CommandType::SetMetronomeEnabled:
+        {
+            metronome->setEnabled(cmd.boolValue);
+            break;
+        }
+
+        case CommandType::SetMetronomeOutput:
+        {
+            metronome->setOutputChannels(cmd.intValue1, cmd.intValue2);
+            break;
+        }
         
         default:
             // Unknown command type
@@ -334,17 +357,48 @@ void AudioEngine::processChannelCommand(const Command& cmd)
     
     switch (cmd.type)
     {
+        
         case CommandType::StartRecord:
         {
+            // Wenn noch keine Loop-Länge etabliert: Playhead auf 0 zurücksetzen,
+            // damit die Aufnahme sauber bei Sample 0 beginnt.
+            if (!loopEngine->hasLoopLength())
+                loopEngine->resetPlayhead();
+
             channel->startRecording(false);
             break;
         }
-        
+
         case CommandType::StopRecord:
         {
+            // Erste Aufnahme beendet → globale Loop-Länge aus Playhead-Position ableiten
+            // (Spec Abschnitt 2: "Erste beendete Aufnahme bestimmt die globale Loop-Länge")
+            if (!loopEngine->hasLoopLength())
+            {
+                const juce::int64 recordedSamples = loopEngine->getCurrentPlayhead();
+
+                if (recordedSamples > 0)
+                {
+                    loopEngine->setLoopLength(recordedSamples);
+
+                    DBG("Loop length set from first recording: " +
+                        juce::String(recordedSamples) + " samples (" +
+                        juce::String(static_cast<double>(recordedSamples) /
+                            currentSampleRate, 2) + "s)");
+                }
+                else
+                {
+                    DBG("WARNING: StopRecord called but playhead is 0 — loop length not set");
+                }
+            }
+
+            // Playhead auf 0: Playback startet direkt am Loop-Anfang
+            loopEngine->resetPlayhead();
+
             channel->stopRecording();
             break;
         }
+
         
         case CommandType::StartPlayback:
         {
@@ -669,4 +723,25 @@ void AudioEngine::removePlugin(int channelIndex, int slotIndex)
         DBG("FX removed from channel " + juce::String(channelIndex) + 
             ", slot " + juce::String(slotIndex));
     }
+}
+
+void AudioEngine::setMetronomeEnabled(bool enabled)
+{
+    metronome->setEnabled(enabled);
+    metronome->setBPM(loopEngine->getBPM());
+    DBG("Metronome " + juce::String(enabled ? "enabled" : "disabled"));
+}
+
+void AudioEngine::setMetronomeOutput(int leftChannel, int rightChannel)
+{
+    metronome->setOutputChannels(leftChannel, rightChannel);
+
+    Command cmd;
+    cmd.type = CommandType::SetMetronomeOutput;
+    cmd.intValue1 = leftChannel;
+    cmd.intValue2 = rightChannel;
+    sendCommand(cmd);
+
+    DBG("Metronome output: " + juce::String(leftChannel) +
+        " / " + juce::String(rightChannel));
 }

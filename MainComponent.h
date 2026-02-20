@@ -46,6 +46,7 @@ private:
     juce::TextButton loadSongButton{"Load Song"};
     juce::TextButton saveSongButton{"Save Song"};
     juce::Label infoLabel;
+    juce::Image logo;
     
     // File chooser (must be member for async API)
     std::unique_ptr<juce::FileChooser> fileChooser;

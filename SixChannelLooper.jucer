@@ -14,7 +14,6 @@
       <FILE id="F5Audio" name="AudioEngine.cpp" compile="1" resource="0"
             file="AudioEngine.cpp"/>
       <FILE id="F5AudioH" name="AudioEngine.h" compile="0" resource="0" file="AudioEngine.h"/>
-      <FILE id="Ba6gLh" name="build_test.sh" compile="0" resource="1" file="build_test.sh"/>
       <FILE id="F7Chan" name="Channel.cpp" compile="1" resource="0" file="Channel.cpp"/>
       <FILE id="F7ChanH" name="Channel.h" compile="0" resource="0" file="Channel.h"/>
       <FILE id="F3ChanS" name="ChannelStripComponent.cpp" compile="1" resource="0"
@@ -31,6 +30,8 @@
             file="MainComponent.cpp"/>
       <FILE id="F2MainH" name="MainComponent.h" compile="0" resource="0"
             file="MainComponent.h"/>
+      <FILE id="iMNjON" name="Metronome.cpp" compile="1" resource="0" file="Metronome.cpp"/>
+      <FILE id="ktRdub" name="Metronome.h" compile="0" resource="0" file="Metronome.h"/>
       <FILE id="lF67FX" name="MidiLearnManager.cpp" compile="1" resource="0"
             file="MidiLearnManager.cpp"/>
       <FILE id="LtpVRL" name="MidiLearnManager.h" compile="0" resource="0"

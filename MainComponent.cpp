@@ -31,9 +31,15 @@ MainComponent::MainComponent()
     addAndMakeVisible(saveSongButton);
     
     // Info label
-    infoLabel.setText("6-Channel Looper - Ready", juce::dontSendNotification);
+    infoLabel.setText("Ready", juce::dontSendNotification);
     infoLabel.setJustificationType(juce::Justification::centred);
     addAndMakeVisible(infoLabel);
+
+
+    logo = juce::ImageCache::getFromMemory(
+        BinaryData::chief_lp6_logo_png,
+        BinaryData::chief_lp6_logo_pngSize);
+
     setSize(1400, 700);
 }
 
@@ -49,9 +55,26 @@ void MainComponent::paint(juce::Graphics& g)
     // Draw title
     g.setColour(juce::Colours::white);
     g.setFont(juce::Font(28.0f, juce::Font::bold));
-    g.drawText("6-Channel Software Looper", 
+    /*g.drawText("6-Channel Software Looper", 
                getLocalBounds().removeFromTop(50), 
-               juce::Justification::centred);
+               juce::Justification::centred);*/
+    if (logo.isValid())
+    {
+        auto headerArea = getLocalBounds().removeFromTop(60);
+
+        //g.drawImageWithin(logo,
+        //    headerArea.getX(),
+        //    headerArea.getY(),
+        //    headerArea.getWidth(),
+        //    headerArea.getHeight(),
+        //    juce::RectanglePlacement::centred);
+
+        g.drawImage(logo,
+            headerArea.toFloat(),
+            juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
+
+    }
+
 }
 
 void MainComponent::resized()
