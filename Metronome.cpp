@@ -10,7 +10,7 @@ Metronome::Metronome()
 void Metronome::prepareToPlay(double newSampleRate)
 {
     jassert(newSampleRate > 0.0);
-    sampleRate = newSampleRate;
+    sampleRate.store(newSampleRate, std::memory_order_release);
     reset();
     recalculate();
 
@@ -87,12 +87,28 @@ void Metronome::processBlock(float* const* outputChannelData,
     // Beat-Phase mit globalem Playhead synchronisieren (bleibt im Takt nach Loop-Wrap)
     beatPhaseAccumulator = std::fmod(static_cast<double>(globalPlayhead), samplesPerBeat);
 
+    // For accent detection: samplesPerBar = samplesPerBeat * beatsPerBar
+    const int    bpb         = beatsPerBar.load(std::memory_order_relaxed);
+    const double samplesPerBar = samplesPerBeat * juce::jmax(1, bpb);
+
     for (int i = 0; i < numSamples; ++i)
     {
-        // Beat-Grenze → neuen Click starten (Phase + Countdown zurücksetzen)
+        // Beat-Grenze → neuen Click starten
         if (beatPhaseAccumulator < 1.0)
         {
+            // Determine whether this beat is the first beat of a bar (accent)
+            const juce::int64 samplePos = globalPlayhead + static_cast<juce::int64>(i);
+            const int barBeat = (samplesPerBar > 0.0)
+                ? static_cast<int>(std::fmod(static_cast<double>(samplePos), samplesPerBar)
+                                   / samplesPerBeat)
+                : 0;
+            const bool isAccent = (barBeat == 0);
+
             sinePhase            = 0.0;
+            sinePhaseIncrement   = isAccent ? accentSinePhaseIncrement
+                                            : regularSinePhaseIncrement;
+            currentClickAmplitude = isAccent ? accentAmplitude.load(std::memory_order_relaxed)
+                                             : amplitude      .load(std::memory_order_relaxed);
             clickSampleCountdown = clickDurationSamples;
         }
 
@@ -106,7 +122,7 @@ void Metronome::processBlock(float* const* outputChannelData,
             {
                 const float env = static_cast<float>(clickSampleCountdown) /
                                   static_cast<float>(clickDurationSamples);
-                const float out = s * amplitude.load(std::memory_order_relaxed) * env;
+                const float out = s * currentClickAmplitude * env;
                 if (hasL) outputChannelData[outL][i] += out;
                 if (hasR) outputChannelData[outR][i] += out;
             }
@@ -127,13 +143,16 @@ void Metronome::recalculate()
     const double ms  = clickDurationMs.load(std::memory_order_relaxed);
     const double hz  = clickFreqHz   .load(std::memory_order_relaxed);
 
-    if (sampleRate <= 0.0 || bpm <= 0.0)
+    const double sr = sampleRate.load(std::memory_order_relaxed);
+    if (sr <= 0.0 || bpm <= 0.0)
         return;
 
-    samplesPerBeat       = (60.0 / bpm) * sampleRate;
-    clickDurationSamples = juce::jmax(juce::int64(1),
-                           static_cast<juce::int64>((ms / 1000.0) * sampleRate));
-    sinePhaseIncrement   = (2.0 * juce::MathConstants<double>::pi * hz) / sampleRate;
+    samplesPerBeat            = (60.0 / bpm) * sr;
+    clickDurationSamples      = juce::jmax(juce::int64(1),
+                                static_cast<juce::int64>((ms / 1000.0) * sr));
+    regularSinePhaseIncrement = (2.0 * juce::MathConstants<double>::pi * hz) / sr;
+    accentSinePhaseIncrement  = (2.0 * juce::MathConstants<double>::pi *
+                                  accentFreqHz.load(std::memory_order_relaxed)) / sr;
 }
 
 float Metronome::nextSineSample()

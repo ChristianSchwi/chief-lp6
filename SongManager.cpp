@@ -21,7 +21,7 @@ juce::Result SongManager::saveSong(Song& song, AudioEngine& audioEngine)
     song.loopLengthSamples    = audioEngine.getLoopEngine().getLoopLength();
     song.bpm                  = audioEngine.getLoopEngine().getBPM();
     song.beatsPerLoop         = audioEngine.getLoopEngine().getBeatsPerLoop();
-    song.quantizationEnabled  = audioEngine.getLoopEngine().isQuantizationEnabled();
+    song.latchModeEnabled     = audioEngine.isLatchMode();
     song.metronomeEnabled     = audioEngine.getMetronome().getEnabled();
     song.metronomeOutputLeft  = audioEngine.getMetronome().getOutputLeft();
     song.metronomeOutputRight = audioEngine.getMetronome().getOutputRight();
@@ -103,7 +103,7 @@ juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audio
     // Global loop settings
     audioEngine.getLoopEngine().setBPM(song.bpm);
     audioEngine.getLoopEngine().setBeatsPerLoop(song.beatsPerLoop);
-    audioEngine.getLoopEngine().setQuantizationEnabled(song.quantizationEnabled);
+    audioEngine.setLatchMode(song.latchModeEnabled);
 
     if (song.loopLengthSamples > 0)
         audioEngine.getLoopEngine().setLoopLength(song.loopLengthSamples);
@@ -359,7 +359,7 @@ juce::var SongManager::songToJSON(const Song& song)
     obj->setProperty("loop_length_samples",   song.loopLengthSamples);
     obj->setProperty("bpm",                   song.bpm);
     obj->setProperty("beats_per_loop",        song.beatsPerLoop);
-    obj->setProperty("quantization_enabled",  song.quantizationEnabled);
+    obj->setProperty("latch_mode_enabled",    song.latchModeEnabled);
     obj->setProperty("metronome_enabled",     song.metronomeEnabled);
     obj->setProperty("metronome_output_left", song.metronomeOutputLeft);
     obj->setProperty("metronome_output_right",song.metronomeOutputRight);
@@ -385,7 +385,7 @@ juce::Result SongManager::jsonToSong(const juce::var& json, Song& song)
     song.loopLengthSamples = obj->getProperty("loop_length_samples");
     song.bpm               = obj->getProperty("bpm");
     song.beatsPerLoop      = obj->getProperty("beats_per_loop");
-    song.quantizationEnabled  = obj->getProperty("quantization_enabled");
+    song.latchModeEnabled     = obj->getProperty("latch_mode_enabled");
     song.metronomeEnabled     = obj->getProperty("metronome_enabled");
     song.metronomeOutputLeft  = obj->getProperty("metronome_output_left");
     song.metronomeOutputRight = obj->getProperty("metronome_output_right");

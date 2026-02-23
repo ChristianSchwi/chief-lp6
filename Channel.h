@@ -45,6 +45,15 @@ public:
     void stopPlayback();
     void clearLoop();
     void requestStopAtLoopEnd();
+    void requestRecordAtLoopEnd();
+    void requestOverdubAtLoopEnd();
+    void requestPlayAtLoopEnd();
+
+    bool hasPendingRecord()  const { return recordPending .load(std::memory_order_relaxed); }
+    bool hasPendingOverdub() const { return overdubPending.load(std::memory_order_relaxed); }
+    bool hasPendingPlay()    const { return playPending   .load(std::memory_order_relaxed); }
+    bool hasPendingStop()    const { return stopPending   .load(std::memory_order_relaxed); }
+    void clearPendingActions();
 
     //==========================================================================
     // Parameters
@@ -57,7 +66,11 @@ public:
     void        setMuted(bool shouldMute);
     bool        isMuted()  const { return muted.load(std::memory_order_relaxed); }
     void        setSolo(bool shouldSolo);
-    bool        isSolo()   const { return solo .load(std::memory_order_relaxed); }
+    bool        isSolo()      const { return solo     .load(std::memory_order_relaxed); }
+    void        setSoloMuted(bool muted) { soloMuted.store(muted, std::memory_order_release); }
+    bool        isSoloMuted() const { return soloMuted.load(std::memory_order_relaxed); }
+    void        setIsActiveChannel(bool active) { isActiveChannel.store(active, std::memory_order_release); }
+    bool        getIsActiveChannel() const      { return isActiveChannel.load(std::memory_order_relaxed); }
 
     //==========================================================================
     // Routing
@@ -127,7 +140,12 @@ protected:
     std::atomic<bool>         loopHasContent {false};
     std::atomic<bool>         muted          {false};
     std::atomic<bool>         solo           {false};
+    std::atomic<bool>         soloMuted      {false};
     std::atomic<bool>         stopPending    {false};
+    std::atomic<bool>         recordPending  {false};
+    std::atomic<bool>         overdubPending {false};
+    std::atomic<bool>         playPending    {false};
+    std::atomic<bool>         isActiveChannel{false};
 
     std::atomic<float>       gainLinear  {1.0f};
     std::atomic<MonitorMode> monitorMode {MonitorMode::WhenTrackActive};

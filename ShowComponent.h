@@ -54,13 +54,14 @@ private:
     juce::Label      showNameLabel;
 
     // Song navigation
-    juce::TextButton prevSongButton {"◀"};
-    juce::TextButton nextSongButton {"▶"};
+    juce::TextButton prevSongButton {"<"};
+    juce::TextButton nextSongButton {">"};
     juce::Label      songPositionLabel;  // "Song 2/5: My Song"
 
     // Individual song controls
-    juce::TextButton loadSongButton {"Load Song"};
-    juce::TextButton saveSongButton {"Save Song"};
+    juce::TextButton loadSongButton  {"Load Song"};
+    juce::TextButton saveSongButton  {"Save Song"};
+    juce::TextButton addToShowButton {"+ Show"};
 
     // File chooser (must outlive dialog)
     std::unique_ptr<juce::FileChooser> fileChooser;
@@ -75,9 +76,9 @@ private:
     void nextSongClicked();
     void loadSongClicked();
     void saveSongClicked();
+    void addToShowClicked();
 
     bool loadAndApplySong(int showSongIndex);
-    void applyCurrentSong();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ShowComponent)
 };

@@ -65,37 +65,50 @@ MainComponent::MainComponent()
         BinaryData::chief_lp6_logo_png,
         BinaryData::chief_lp6_logo_pngSize);
 
+    // Show alert when a plugin fails to load
+    audioEngine.onPluginLoadError = [](int ch, int slot, const juce::String& msg)
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon, "Plugin Load Error",
+            "Ch" + juce::String(ch + 1) + " Slot " + juce::String(slot + 1) + ": " + msg);
+    };
+
+    // Auto-save settings whenever the audio device configuration changes
+    audioEngine.getDeviceManager().addChangeListener(this);
+
+    // Keyboard shortcuts — intercept before child components
+    setWantsKeyboardFocus(true);
+    addKeyListener(this);
+
     setSize(1400, 780);
 }
 
-MainComponent::~MainComponent() {}
+MainComponent::~MainComponent()
+{
+    audioEngine.getDeviceManager().removeChangeListener(this);
+}
 
 //==============================================================================
 void MainComponent::paint(juce::Graphics& g)
 {
     g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
 
-    if (logo.isValid())
-    {
-        g.drawImage(logo,
-                    getLocalBounds().removeFromTop(50).toFloat(),
+    if (logo.isValid() && !logoArea.isEmpty())
+        g.drawImage(logo, logoArea.toFloat(),
                     juce::RectanglePlacement::centred |
                     juce::RectanglePlacement::onlyReduceInSize);
-    }
 }
 
 void MainComponent::resized()
 {
     auto area = getLocalBounds();
 
-    // Logo header
-    area.removeFromTop(50);
-
     // Show/song bar at the bottom — fixed height
     showComponent->setBounds(area.removeFromBottom(36));
 
-    // Info row: label (left) + audio settings button (right)
+    // Info row: logo (right corner) + audio settings button + info label
     auto infoRow = area.removeFromBottom(26);
+    logoArea = infoRow.removeFromRight(90).reduced(2, 2);
     audioSettingsButton.setBounds(infoRow.removeFromRight(120).reduced(2, 2));
     infoLabel.setBounds(infoRow.reduced(4, 0));
 
@@ -106,6 +119,142 @@ void MainComponent::resized()
     const int channelWidth = area.getWidth() / 6;
     for (int i = 0; i < 6; ++i)
         channelStrips[i]->setBounds(area.removeFromLeft(channelWidth).reduced(3));
+}
+
+//==============================================================================
+void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
+{
+    if (source == &audioEngine.getDeviceManager())
+    {
+        audioEngine.saveAudioSettings();
+        updateInfoLabel();
+        // Refresh metro output box — channel count may have changed
+        transportComponent.refreshAfterAudioInit();
+    }
+}
+
+void MainComponent::updateInfoLabel()
+{
+    infoLabel.setText(
+        "Audio: " + juce::String(audioEngine.getSampleRate(), 0) + " Hz  |  " +
+        juce::String(audioEngine.getBufferSize()) + " samples  |  " +
+        juce::String(audioEngine.getNumInputChannels()) + " in / " +
+        juce::String(audioEngine.getNumOutputChannels()) + " out",
+        juce::dontSendNotification);
+}
+
+//==============================================================================
+// Keyboard Shortcuts
+//==============================================================================
+
+bool MainComponent::keyPressed(const juce::KeyPress& key, juce::Component*)
+{
+    const int code = key.getKeyCode();
+
+    // Space — global play/stop
+    if (code == juce::KeyPress::spaceKey)
+    {
+        audioEngine.setPlaying(!audioEngine.isPlaying());
+        return true;
+    }
+
+    // O — toggle overdub mode
+    if (code == 'o' || code == 'O')
+    {
+        audioEngine.setOverdubMode(!audioEngine.isInOverdubMode());
+        return true;
+    }
+
+    // L — toggle latch mode
+    if (code == 'l' || code == 'L')
+    {
+        audioEngine.setLatchMode(!audioEngine.isLatchMode());
+        return true;
+    }
+
+    // R — trigger active channel (record/play/overdub/stop)
+    if (code == 'r' || code == 'R')
+    {
+        triggerChannel(audioEngine.getActiveChannel());
+        return true;
+    }
+
+    // 1-6 — set active channel and trigger it
+    if (code >= '1' && code <= '6')
+    {
+        const int ch = code - '1';
+        audioEngine.setActiveChannel(ch);
+        triggerChannel(ch);
+        return true;
+    }
+
+    // Left / Right arrow — previous / next channel
+    if (code == juce::KeyPress::leftKey)
+    {
+        audioEngine.prevChannel();
+        return true;
+    }
+    if (code == juce::KeyPress::rightKey)
+    {
+        audioEngine.nextChannel();
+        return true;
+    }
+
+    // C — clear active channel loop
+    if (code == 'c' || code == 'C')
+    {
+        const int ch = audioEngine.getActiveChannel();
+        auto* channel = audioEngine.getChannel(ch);
+        if (channel && channel->hasLoop())
+        {
+            Command cmd;
+            cmd.type         = CommandType::ClearChannel;
+            cmd.channelIndex = ch;
+            audioEngine.sendCommand(cmd);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+void MainComponent::triggerChannel(int channelIndex)
+{
+    auto* channel = audioEngine.getChannel(channelIndex);
+    if (!channel) return;
+
+    // Cancel pending latch action on second press
+    if (channel->hasPendingRecord() || channel->hasPendingOverdub() ||
+        channel->hasPendingPlay()   || channel->hasPendingStop())
+    {
+        Command cmd;
+        cmd.type         = CommandType::CancelPending;
+        cmd.channelIndex = channelIndex;
+        audioEngine.sendCommand(cmd);
+        return;
+    }
+
+    const bool overdubMode = audioEngine.isInOverdubMode();
+    const auto state       = channel->getState();
+    const bool hasLoop     = channel->hasLoop();
+
+    if (overdubMode && state == ChannelState::Playing)
+    {
+        Command cmd;
+        cmd.type         = CommandType::StartOverdub;
+        cmd.channelIndex = channelIndex;
+        audioEngine.sendCommand(cmd);
+    }
+    else if (state == ChannelState::Overdubbing)
+        audioEngine.sendCommand(Command::stopRecord(channelIndex));
+    else if (state == ChannelState::Recording)
+        audioEngine.sendCommand(Command::stopRecord(channelIndex));
+    else if (!hasLoop)
+        audioEngine.sendCommand(Command::startRecord(channelIndex));
+    else if (state == ChannelState::Playing)
+        audioEngine.sendCommand(Command::stopPlayback(channelIndex));
+    else
+        audioEngine.sendCommand(Command::startPlayback(channelIndex));
 }
 
 //==============================================================================
@@ -126,7 +275,6 @@ void MainComponent::initializeAudio()
     // --- Global loop settings ---
     audioEngine.getLoopEngine().setBPM(120.0);
     audioEngine.getLoopEngine().setBeatsPerLoop(4);
-    audioEngine.getLoopEngine().setQuantizationEnabled(true);
 
     // BUG B FIX: calculateLoopLengthFromBPM() NUR aufrufen wenn Metronom aktiv.
     // Im Startup-Zustand ist das Metronom AUS → freier Modus → Loop-Länge bleibt 0.
@@ -137,10 +285,5 @@ void MainComponent::initializeAudio()
 
     // Transport starts stopped; user must press Play or hit Record on a channel.
 
-    infoLabel.setText(
-        "Audio: " + juce::String(audioEngine.getSampleRate(), 0) + " Hz  |  " +
-        juce::String(audioEngine.getBufferSize()) + " samples  |  " +
-        juce::String(audioEngine.getNumInputChannels()) + " in / " +
-        juce::String(audioEngine.getNumOutputChannels()) + " out",
-        juce::dontSendNotification);
+    updateInfoLabel();
 }

@@ -20,7 +20,7 @@ enum class CommandType
     LoadPlugin, UnloadPlugin, SetPluginBypass,
 
     // Loop engine
-    SetLoopLength, SetBPM, SetBeatsPerLoop, SetQuantization, ResetPlayhead,
+    SetLoopLength, SetBPM, SetBeatsPerLoop, ResetPlayhead,
 
     // Global
     SetGlobalOverdubMode, ChangeActiveChannel, ClearChannel,
@@ -34,7 +34,10 @@ enum class CommandType
     //       Message-Thread (Atomics + LoopEngine-Calls).
 
     // Emergency
-    EmergencyStop
+    EmergencyStop,
+
+    // Latch
+    CancelPending
 };
 
 //==============================================================================

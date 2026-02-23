@@ -37,9 +37,10 @@ private:
     int channelIdx;
     int slotIdx;  // -1 = VSTi, 0-2 = FX
 
-    juce::Label     slotLabel;
-    juce::ComboBox  pluginComboBox;
+    juce::Label      slotLabel;
+    juce::ComboBox   pluginComboBox;
     juce::TextButton bypassButton{"B"};
+    juce::TextButton editButton  {"E"};
     juce::TextButton removeButton{"X"};
 
     // Identifier-String für jede ComboBox-ID → Plugin
@@ -49,6 +50,7 @@ private:
     void loadSelected();
     void removePlugin();
     void toggleBypass();
+    void openEditor();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginSlotRow)
 };

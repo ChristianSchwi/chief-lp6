@@ -242,25 +242,35 @@ void MidiLearnManager::applyMapping(const MidiMapping& m, const juce::MidiMessag
             break;
 
         case MidiControlTarget::Record:
-            if (norm >= 0.5f)
-                cmd.type = CommandType::StartRecord;
-            else
-                cmd.type = CommandType::StopRecord;
+        {
+            if (norm < 0.5f) return;  // only on press, not release
+            auto* ch = audioEngine.getChannel(m.channelIndex);
+            if (!ch) return;
+            const auto st = ch->getState();
+            cmd.type = (st == ChannelState::Recording || st == ChannelState::Overdubbing)
+                       ? CommandType::StopRecord : CommandType::StartRecord;
             break;
+        }
 
         case MidiControlTarget::Play:
-            if (norm >= 0.5f)
-                cmd.type = CommandType::StartPlayback;
-            else
-                cmd.type = CommandType::StopPlayback;
+        {
+            if (norm < 0.5f) return;  // only on press, not release
+            auto* ch = audioEngine.getChannel(m.channelIndex);
+            if (!ch) return;
+            cmd.type = (ch->getState() == ChannelState::Playing)
+                       ? CommandType::StopPlayback : CommandType::StartPlayback;
             break;
+        }
 
         case MidiControlTarget::Overdub:
-            if (norm >= 0.5f)
-                cmd.type = CommandType::StartOverdub;
-            else
-                cmd.type = CommandType::StopOverdub;
+        {
+            if (norm < 0.5f) return;  // only on press, not release
+            auto* ch = audioEngine.getChannel(m.channelIndex);
+            if (!ch) return;
+            cmd.type = (ch->getState() == ChannelState::Overdubbing)
+                       ? CommandType::StopOverdub : CommandType::StartOverdub;
             break;
+        }
 
         case MidiControlTarget::Clear:
             if (norm >= 0.5f)
@@ -273,6 +283,52 @@ void MidiLearnManager::applyMapping(const MidiMapping& m, const juce::MidiMessag
             cmd.type     = CommandType::SetMonitorMode;
             cmd.intValue1 = juce::jlimit(0, 3, static_cast<int>(mapped));
             break;
+
+        case MidiControlTarget::GlobalPlayStop:
+            if (norm >= 0.5f)
+                audioEngine.setPlaying(!audioEngine.isPlaying());
+            return;
+
+        case MidiControlTarget::NextChannel:
+            if (norm >= 0.5f) audioEngine.nextChannel();
+            return;
+
+        case MidiControlTarget::PrevChannel:
+            if (norm >= 0.5f) audioEngine.prevChannel();
+            return;
+
+        case MidiControlTarget::NextSong:
+            if (norm >= 0.5f && onNextSong) onNextSong();
+            return;
+
+        case MidiControlTarget::PrevSong:
+            if (norm >= 0.5f && onPrevSong) onPrevSong();
+            return;
+
+        case MidiControlTarget::Panic:
+            if (norm >= 0.5f) audioEngine.emergencyStop();
+            return;
+
+        case MidiControlTarget::MetronomeToggle:
+            if (norm >= 0.5f)
+                audioEngine.setMetronomeEnabled(!audioEngine.getMetronome().getEnabled());
+            return;
+
+        case MidiControlTarget::GlobalOverdubToggle:
+            if (norm >= 0.5f)
+                audioEngine.setOverdubMode(!audioEngine.isInOverdubMode());
+            return;
+
+        case MidiControlTarget::LatchModeToggle:
+            if (norm >= 0.5f)
+                audioEngine.setLatchMode(!audioEngine.isLatchMode());
+            return;
+
+        case MidiControlTarget::AutoStartToggle:
+            if (norm >= 0.5f)
+                audioEngine.setAutoStart(!audioEngine.isAutoStartEnabled(),
+                                         audioEngine.getAutoStartThresholdDb());
+            return;
 
         default:
             return;
@@ -345,7 +401,7 @@ bool MidiLearnManager::loadMappings(const juce::File& file)
         m.maxValue      = static_cast<float>(
                               entry->getDoubleAttribute("maxValue", 1.0));
 
-        if (m.channelIndex >= 0 && m.isValid())
+        if (m.channelIndex >= -1 && m.channelIndex < 6 && m.isValid())
             mappings[m.getKey()] = m;
     }
 
@@ -371,7 +427,17 @@ juce::String MidiLearnManager::targetName(MidiControlTarget t)
         case MidiControlTarget::Gain:        return "Gain";
         case MidiControlTarget::Mute:        return "Mute";
         case MidiControlTarget::Solo:        return "Solo";
-        case MidiControlTarget::MonitorMode: return "Monitor Mode";
-        default:                             return "Unknown";
+        case MidiControlTarget::MonitorMode:    return "Monitor Mode";
+        case MidiControlTarget::GlobalPlayStop:      return "Global Play/Stop";
+        case MidiControlTarget::NextChannel:         return "Next Channel";
+        case MidiControlTarget::PrevChannel:         return "Prev Channel";
+        case MidiControlTarget::NextSong:            return "Next Song";
+        case MidiControlTarget::PrevSong:            return "Prev Song";
+        case MidiControlTarget::Panic:               return "Panic";
+        case MidiControlTarget::MetronomeToggle:     return "Metronome On/Off";
+        case MidiControlTarget::GlobalOverdubToggle: return "Overdub Mode On/Off";
+        case MidiControlTarget::LatchModeToggle:     return "Latch Mode On/Off";
+        case MidiControlTarget::AutoStartToggle:     return "Auto Start On/Off";
+        default:                                     return "Unknown";
     }
 }

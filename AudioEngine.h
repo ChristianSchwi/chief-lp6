@@ -103,6 +103,10 @@ public:
                          const juce::String& pluginIdentifier,
                          const juce::String& stateBase64 = {});
 
+    /** Called on the message thread when a plugin fails to load. Set before loading. */
+    std::function<void(int channelIndex, int slotIndex, const juce::String& error)>
+        onPluginLoadError;
+
     void removePlugin(int channelIndex, int slotIndex);
 
     //==========================================================================
@@ -114,6 +118,10 @@ public:
 
     void setOverdubMode(bool enabled);
     bool isInOverdubMode() const { return overdubMode.load(std::memory_order_relaxed); }
+
+    /** Latch mode: actions (rec/play/stop) take effect at the next loop boundary. */
+    void setLatchMode(bool enabled) { latchMode.store(enabled, std::memory_order_release); }
+    bool isLatchMode()        const { return latchMode.load(std::memory_order_relaxed); }
 
     void emergencyStop();
 
@@ -133,6 +141,11 @@ public:
     /** Set number of count-in beats before recording actually starts (0 = off). */
     void setCountInBeats(int beats);
     int  getCountInBeats() const { return countInBeats.load(std::memory_order_relaxed); }
+
+    /** True while a count-in countdown is running (safe to call from message thread). */
+    bool isCountingIn()            const { return countInActive.load(std::memory_order_relaxed); }
+    /** Channel index waiting to record after count-in (-1 if none). */
+    int  getCountInPendingChannel() const { return pendingRecordChannel.load(std::memory_order_relaxed); }
 
     //==========================================================================
     // Loop Engine
@@ -181,6 +194,10 @@ public:
     /** @brief Ausgangskanal-Paar für den Click. */
     void setMetronomeOutput(int leftChannel, int rightChannel);
 
+    /** @brief Beats per bar — controls accent beat detection and bar-based count-in. */
+    void setBeatsPerBar(int n);
+    int  getBeatsPerBar() const;
+
     //==========================================================================
     // Song Reset
     //==========================================================================
@@ -203,6 +220,16 @@ public:
     bool   isCommandQueueFull()    const { return commandQueue.isFull(); }
 
     MidiLearnManager& getMidiLearnManager() { return *midiLearnManager; }
+
+    //==========================================================================
+    // Audio Settings Persistence
+    //==========================================================================
+
+    /** Save current AudioDeviceManager state to disk. Returns true on success. */
+    bool saveAudioSettings() const;
+
+    /** Returns the settings file path. */
+    juce::File getAudioSettingsFile() const;
 
 private:
     //==========================================================================
@@ -230,6 +257,7 @@ private:
     // Atomics (shared between threads)
     std::atomic<bool>  isPlayingFlag        {false};
     std::atomic<bool>  overdubMode          {false};
+    std::atomic<bool>  latchMode            {false};
     std::atomic<bool>  isInitialised        {false};
     std::atomic<int>   activeChannelIndex   {0};
 
@@ -239,10 +267,10 @@ private:
     bool               autoStartTriggered       {false};       // audio thread only
 
     // Count-in
-    std::atomic<int>  countInBeats            {0};
-    bool              countInActive           {false};         // audio thread only
-    juce::int64       countInSamplesRemaining {0};             // audio thread only
-    int               pendingRecordChannel    {-1};            // audio thread only
+    std::atomic<int>   countInBeats            {0};
+    std::atomic<bool>  countInActive           {false};   // written audio thread, read UI thread
+    juce::int64        countInSamplesRemaining {0};       // audio thread only
+    std::atomic<int>   pendingRecordChannel    {-1};      // written audio thread, read UI thread
 
     // Working buffers (audio thread only)
     juce::AudioBuffer<float> inputBuffer;

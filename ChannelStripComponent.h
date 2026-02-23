@@ -4,6 +4,34 @@
 #include "AudioEngine.h"
 
 /**
+ * @brief TextButton that forwards right-clicks to its parent component.
+ *
+ * Without this, JUCE TextButton fires onClick on both left AND right mouse
+ * button release, so right-clicking the main REC/PLAY button would start
+ * recording instead of showing the context menu.
+ */
+struct ContextMenuButton : public juce::TextButton
+{
+    using juce::TextButton::TextButton;
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isRightButtonDown())
+        {
+            // Forward to parent so it can show the context menu.
+            // Do NOT call TextButton::mouseDown — that would arm the button.
+            if (auto* p = getParentComponent())
+                p->mouseDown(e.getEventRelativeTo(p));
+            return;
+        }
+        juce::TextButton::mouseDown(e);
+    }
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ContextMenuButton)
+};
+
+//==============================================================================
+/**
  * @file ChannelStripComponent.h
  * @brief Single channel strip UI
  *
@@ -31,18 +59,18 @@ private:
     const int    channelIndex;
 
     //==========================================================================
-    // Main context-aware button
-    juce::TextButton mainButton;
+    // Main context-aware button (ContextMenuButton so right-click → context menu)
+    ContextMenuButton mainButton;
 
-    // Secondary buttons
-    juce::TextButton clrButton   {"CLR"};
-    juce::TextButton ioButton    {"I/O"};
-    juce::TextButton fxButton    {"FX"};
+    // Secondary buttons (also ContextMenuButton for consistent right-click behaviour)
+    ContextMenuButton clrButton   {"CLR"};
+    ContextMenuButton ioButton    {"I/O"};
+    ContextMenuButton fxButton    {"FX"};
 
     // Controls
-    juce::Slider     gainSlider;
-    juce::TextButton muteButton  {"M"};
-    juce::TextButton soloButton  {"S"};
+    juce::Slider      gainSlider;
+    ContextMenuButton muteButton  {"M"};
+    ContextMenuButton soloButton  {"S"};
     juce::ComboBox   monitorModeBox;
 
     // Display

@@ -53,6 +53,15 @@ public:
     void setClickDurationMs(double ms);
     void setAmplitude(float amp) { amplitude.store(amp, std::memory_order_release); }
 
+    /** Number of beats per bar — controls accent on beat 1 and bar-based count-in. */
+    void setBeatsPerBar(int n) { beatsPerBar.store(juce::jlimit(1, 32, n), std::memory_order_release); }
+    int  getBeatsPerBar() const { return beatsPerBar.load(std::memory_order_relaxed); }
+
+    /** Frequency for the accented (first-beat-of-bar) click. Default 1600 Hz. */
+    void setAccentFrequency(double hz) { accentFreqHz.store(hz, std::memory_order_release); }
+    /** Amplitude for the accented click (0-1). Default 1.0. */
+    void setAccentAmplitude(float amp) { accentAmplitude.store(amp, std::memory_order_release); }
+
     //==========================================================================
     // Audio-Thread — jeden Block aufrufen
     void processBlock(float* const* outputChannelData,
@@ -72,16 +81,22 @@ private:
     std::atomic<double> clickFreqHz     {1000.0};
     std::atomic<double> clickDurationMs {10.0};
     std::atomic<float>  amplitude       {0.7f};
+    std::atomic<int>    beatsPerBar     {4};
+    std::atomic<double> accentFreqHz    {1600.0};  // higher pitch on bar beat 1
+    std::atomic<float>  accentAmplitude {1.0f};    // slightly louder on bar beat 1
 
     //==========================================================================
     // Audio-Thread only (keine Atomics nötig)
-    double      sampleRate           {44100.0};
-    double      samplesPerBeat       {0.0};
-    double      sinePhase            {0.0};
-    double      sinePhaseIncrement   {0.0};
-    juce::int64 clickSampleCountdown {0};
-    juce::int64 clickDurationSamples {0};
-    double      beatPhaseAccumulator {0.0};
+    std::atomic<double> sampleRate           {44100.0};
+    double      samplesPerBeat               {0.0};
+    double      sinePhase                    {0.0};
+    double      regularSinePhaseIncrement    {0.0};  // normal beat
+    double      accentSinePhaseIncrement     {0.0};  // bar beat 1
+    double      sinePhaseIncrement           {0.0};  // active for current click (set per-click)
+    juce::int64 clickSampleCountdown         {0};
+    juce::int64 clickDurationSamples         {0};
+    double      beatPhaseAccumulator         {0.0};
+    float       currentClickAmplitude        {0.7f}; // set per-click (accent or regular)
 
     void  recalculate();
     float nextSineSample();

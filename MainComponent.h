@@ -17,7 +17,9 @@
  *   Row 1:  TransportComponent (left panel) + 6 channel strips
  *   Bottom: ShowComponent (show/song management bar)
  */
-class MainComponent : public juce::Component
+class MainComponent : public juce::Component,
+                      public juce::ChangeListener,
+                      public juce::KeyListener
 {
 public:
     MainComponent();
@@ -43,10 +45,21 @@ private:
 
     juce::Label      infoLabel;
     juce::TextButton audioSettingsButton {"Audio Settings"};
-    juce::Image logo;
+    juce::Image      logo;
+    juce::Rectangle<int> logoArea;
+
+    juce::TooltipWindow tooltipWindow {this, 600};  // 600 ms hover delay
 
     //==========================================================================
     void initializeAudio();
+    void updateInfoLabel();
+
+    void changeListenerCallback(juce::ChangeBroadcaster* source) override;
+
+    // KeyListener — global keyboard shortcuts
+    bool keyPressed(const juce::KeyPress& key,
+                    juce::Component* originatingComponent) override;
+    void triggerChannel(int channelIndex);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

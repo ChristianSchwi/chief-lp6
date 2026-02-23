@@ -12,10 +12,18 @@ void Channel::prepareToPlay(double newSampleRate, int newMaxBlockSize,
     maxBlockSize   = newMaxBlockSize;
     loopBufferSize = maxLoopLengthSamples;
 
-    loopBuffer   .setSize(2, static_cast<int>(maxLoopLengthSamples), false, true, true);
-    workingBuffer.setSize(2, newMaxBlockSize * 2,                     false, true, true);
-    fxBuffer     .setSize(2, newMaxBlockSize * 2,                     false, true, true);
-    loopBuffer   .clear();
+    // Preserve loop content across device changes (keepExistingContent=true).
+    // Only clear if there is no recorded audio to preserve.
+    const bool hasContent = loopHasContent.load(std::memory_order_relaxed);
+    loopBuffer.setSize(2, static_cast<int>(maxLoopLengthSamples),
+                       hasContent,   // keepExistingContent
+                       true,         // clearExtraSpace
+                       false);       // avoidReallocating
+    if (!hasContent)
+        loopBuffer.clear();
+
+    workingBuffer.setSize(2, newMaxBlockSize * 2, false, true, true);
+    fxBuffer     .setSize(2, newMaxBlockSize * 2, false, true, true);
     workingBuffer.clear();
     fxBuffer     .clear();
 
@@ -46,6 +54,14 @@ void Channel::releaseResources()
 //==============================================================================
 // State Management
 //==============================================================================
+
+void Channel::clearPendingActions()
+{
+    stopPending   .store(false, std::memory_order_release);
+    recordPending .store(false, std::memory_order_release);
+    overdubPending.store(false, std::memory_order_release);
+    playPending   .store(false, std::memory_order_release);
+}
 
 void Channel::startRecording(bool isOverdub)
 {
@@ -81,27 +97,77 @@ void Channel::requestStopAtLoopEnd()
     stopPending.store(true, std::memory_order_release);
 }
 
+void Channel::requestRecordAtLoopEnd()
+{
+    recordPending.store(true, std::memory_order_release);
+}
+
+void Channel::requestOverdubAtLoopEnd()
+{
+    overdubPending.store(true, std::memory_order_release);
+}
+
+void Channel::requestPlayAtLoopEnd()
+{
+    playPending.store(true, std::memory_order_release);
+}
+
 void Channel::checkAndExecutePendingStop(juce::int64 playheadPosition,
                                           juce::int64 loopLength, int numSamples)
 {
-    if (!stopPending.load(std::memory_order_acquire)) return;
+    // Early exit if nothing is pending
+    const bool anyPending = stopPending   .load(std::memory_order_acquire)
+                         || recordPending .load(std::memory_order_relaxed)
+                         || overdubPending.load(std::memory_order_relaxed)
+                         || playPending   .load(std::memory_order_relaxed);
+    if (!anyPending) return;
+
+    // Fire only at loop boundary: playhead wrapped in this block
     if (loopLength <= 0 || loopLength <= static_cast<juce::int64>(numSamples)
         || playheadPosition >= static_cast<juce::int64>(numSamples))
         return;
 
-    stopPending.store(false, std::memory_order_release);
-    const auto cur = state.load(std::memory_order_relaxed);
-    if (cur == ChannelState::Recording || cur == ChannelState::Overdubbing)
-        stopRecording();
-    else if (cur == ChannelState::Playing)
-        stopPlayback();
+    // Pending stop (highest priority — processed before any pending start)
+    if (stopPending.load(std::memory_order_relaxed))
+    {
+        stopPending.store(false, std::memory_order_release);
+        const auto cur = state.load(std::memory_order_relaxed);
+        if (cur == ChannelState::Recording || cur == ChannelState::Overdubbing)
+            stopRecording();
+        else if (cur == ChannelState::Playing)
+            stopPlayback();
+    }
+
+    // Pending record start
+    if (recordPending.load(std::memory_order_relaxed))
+    {
+        recordPending.store(false, std::memory_order_release);
+        startRecording(false);
+    }
+
+    // Pending overdub start
+    if (overdubPending.load(std::memory_order_relaxed))
+    {
+        overdubPending.store(false, std::memory_order_release);
+        startRecording(true);
+    }
+
+    // Pending play start
+    if (playPending.load(std::memory_order_relaxed))
+    {
+        playPending.store(false, std::memory_order_release);
+        startPlayback();
+    }
 }
 
 void Channel::clearLoop()
 {
     state.store(ChannelState::Idle, std::memory_order_release);
     loopHasContent.store(false,     std::memory_order_release);
-    stopPending.store(false,        std::memory_order_release);
+    stopPending   .store(false,     std::memory_order_release);
+    recordPending .store(false,     std::memory_order_release);
+    overdubPending.store(false,     std::memory_order_release);
+    playPending   .store(false,     std::memory_order_release);
     loopBuffer.clear();
 }
 
@@ -240,7 +306,16 @@ void Channel::processFXChain(juce::AudioBuffer<float>& buffer,
         if (slot.bypassed.load(std::memory_order_acquire)) continue;
         if (slot.crashed .load(std::memory_order_acquire)) continue;
         if (!slot.plugin)                                   continue;
-        try   { slot.plugin->processBlock(buffer, midiBuffer); }
+        try
+        {
+            // Pass a non-owning view of exactly numSamples so the plugin advances its
+            // internal state (envelopes, LFOs, delay lines) by exactly one real block,
+            // not by the over-allocated buffer size (which would be 2× too fast).
+            juce::AudioBuffer<float> view (buffer.getArrayOfWritePointers(),
+                                           buffer.getNumChannels(),
+                                           numSamples);
+            slot.plugin->processBlock(view, midiBuffer);
+        }
         catch (...)
         {
             slot.crashed.store(true, std::memory_order_release);
@@ -314,7 +389,7 @@ bool Channel::shouldMonitor() const
         case MonitorMode::AlwaysOn:       return true;
         case MonitorMode::WhileRecording: return cur == ChannelState::Recording
                                               || cur == ChannelState::Overdubbing;
-        case MonitorMode::WhenTrackActive:return cur != ChannelState::Idle;
+        case MonitorMode::WhenTrackActive:return isActiveChannel.load(std::memory_order_relaxed);
         default:                          return false;
     }
 }

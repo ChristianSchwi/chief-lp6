@@ -45,6 +45,14 @@ ShowComponent::ShowComponent(AudioEngine& engine,
     saveSongButton.onClick = [this] { saveSongClicked(); };
     addAndMakeVisible(saveSongButton);
 
+    addToShowButton.onClick = [this] { addToShowClicked(); };
+    addToShowButton.setEnabled(false);  // only when a show is loaded
+    addAndMakeVisible(addToShowButton);
+
+    // Wire MIDI song-navigation callbacks
+    audioEngine.getMidiLearnManager().onNextSong = [this] { nextSongClicked(); };
+    audioEngine.getMidiLearnManager().onPrevSong = [this] { prevSongClicked(); };
+
     updateSongPositionLabel();
     startTimer(500);  // 2 Hz — just for label refresh
 }
@@ -85,8 +93,9 @@ void ShowComponent::resized()
     area.removeFromLeft(10);
 
     // --- Individual song (right) ---
-    loadSongButton.setBounds(area.removeFromLeft(100).reduced(2));
-    saveSongButton.setBounds(area.removeFromLeft(100).reduced(2));
+    loadSongButton  .setBounds(area.removeFromLeft(90).reduced(2));
+    saveSongButton  .setBounds(area.removeFromLeft(90).reduced(2));
+    addToShowButton .setBounds(area.removeFromLeft(70).reduced(2));
 }
 
 //==============================================================================
@@ -163,6 +172,7 @@ void ShowComponent::loadShowClicked()
 
         showNameLabel.setText(currentShow.showName, juce::dontSendNotification);
         saveShowButton.setEnabled(true);
+        addToShowButton.setEnabled(true);
         updateSongPositionLabel();
 
         // Auto-load first song if available
@@ -337,5 +347,26 @@ void ShowComponent::saveSongClicked()
                 juce::AlertWindow::WarningIcon, "Save Song",
                 "Failed to save: " + result.getErrorMessage());
         }
+    });
+}
+
+void ShowComponent::addToShowClicked()
+{
+    if (!showLoaded) return;
+
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Select Song Directory to Add to Show",
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
+
+    const auto flags = juce::FileBrowserComponent::openMode |
+                       juce::FileBrowserComponent::canSelectDirectories;
+
+    fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+    {
+        auto dir = chooser.getResult();
+        if (!dir.isDirectory()) return;
+
+        currentShow.addSong(dir);
+        updateSongPositionLabel();
     });
 }

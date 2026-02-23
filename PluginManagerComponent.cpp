@@ -30,6 +30,11 @@ PluginSlotRow::PluginSlotRow(AudioEngine& engine, int channelIndex, int slotInde
         addAndMakeVisible(bypassButton);
     }
 
+    // Edit-Button (open plugin GUI)
+    editButton.setTooltip("Open plugin editor");
+    editButton.onClick = [this] { openEditor(); };
+    addAndMakeVisible(editButton);
+
     // Remove-Button
     removeButton.setTooltip("Plugin entfernen");
     removeButton.onClick = [this] { removePlugin(); };
@@ -63,10 +68,37 @@ void PluginSlotRow::populateComboBox()
         ++id;
     }
 
-    // Aktuell geladenes Plugin vorselektieren
-    // (vereinfacht: wir vergleichen mit dem Namen — exakte Methode erfordert
-    //  einen Getter am Channel der den geladenen Plugin-Namen zurückgibt)
-    pluginComboBox.setSelectedId(1, juce::dontSendNotification);
+    // Pre-select the currently loaded plugin (if any)
+    int preSelectedId = 1;  // default: nothing selected
+    auto* channel = audioEngine.getChannel(channelIdx);
+    if (channel)
+    {
+        juce::String loadedIdentifier;
+        if (slotIdx == -1)
+        {
+            if (auto* vstiCh = dynamic_cast<VSTiChannel*>(channel))
+                if (auto* vsti = vstiCh->getVSTi())
+                    loadedIdentifier = vsti->getPluginDescription().createIdentifierString();
+        }
+        else
+        {
+            if (auto* plugin = channel->getPlugin(slotIdx))
+                loadedIdentifier = plugin->getPluginDescription().createIdentifierString();
+        }
+
+        if (loadedIdentifier.isNotEmpty())
+        {
+            for (int i = 1; i < pluginIdentifiers.size(); ++i)
+            {
+                if (pluginIdentifiers[i] == loadedIdentifier)
+                {
+                    preSelectedId = i + 1;  // ComboBox ID = array index + 1
+                    break;
+                }
+            }
+        }
+    }
+    pluginComboBox.setSelectedId(preSelectedId, juce::dontSendNotification);
 }
 
 void PluginSlotRow::loadSelected()
@@ -105,6 +137,60 @@ void PluginSlotRow::toggleBypass()
     bypassButton.setButtonText(bypassed ? "B!" : "B");
 }
 
+void PluginSlotRow::openEditor()
+{
+    juce::AudioPluginInstance* plugin = nullptr;
+    auto* channel = audioEngine.getChannel(channelIdx);
+    if (!channel) return;
+
+    if (slotIdx == -1)
+    {
+        if (auto* vstiCh = dynamic_cast<VSTiChannel*>(channel))
+            plugin = vstiCh->getVSTi();
+    }
+    else
+    {
+        plugin = channel->getPlugin(slotIdx);
+    }
+
+    if (!plugin)
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::InfoIcon,
+            "No Plugin",
+            "No plugin is loaded in this slot.");
+        return;
+    }
+
+    // Re-open guard: if editor is already open, bring it to front
+    if (auto* existing = plugin->getActiveEditor())
+    {
+        if (auto* w = existing->findParentComponentOfClass<juce::ResizableWindow>())
+            w->toFront(true);
+        else
+            existing->toFront(true);
+        return;
+    }
+
+    auto* editor = plugin->createEditor();
+    if (!editor)
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::InfoIcon,
+            "No Editor",
+            plugin->getName() + " provides no GUI editor.");
+        return;
+    }
+
+    juce::DialogWindow::LaunchOptions opts;
+    opts.content.setOwned(editor);
+    opts.dialogTitle                  = plugin->getName();
+    opts.escapeKeyTriggersCloseButton = true;
+    opts.useNativeTitleBar            = true;
+    opts.resizable                    = true;
+    opts.launchAsync();
+}
+
 void PluginSlotRow::refresh()
 {
     populateComboBox();
@@ -120,10 +206,12 @@ void PluginSlotRow::resized()
     {
         removeButton.setBounds(area.removeFromRight(22));
         bypassButton.setBounds(area.removeFromRight(22));
+        editButton  .setBounds(area.removeFromRight(22));
     }
     else
     {
         removeButton.setBounds(area.removeFromRight(22));
+        editButton  .setBounds(area.removeFromRight(22));
     }
 
     area.reduce(2, 0);

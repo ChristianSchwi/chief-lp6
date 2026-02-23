@@ -374,7 +374,8 @@ void PluginScanner::run()
             break;
         
         auto* format = formats.getFormat(formatIdx);
-        
+        if (!format) continue;
+
         juce::PluginDirectoryScanner scanner(knownPlugins,
                                              *format,
                                              searchPaths,

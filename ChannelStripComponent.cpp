@@ -11,11 +11,13 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     channelLabel.setText("CH " + juce::String(index + 1), juce::dontSendNotification);
     channelLabel.setFont(juce::Font(14.0f, juce::Font::bold));
     channelLabel.setJustificationType(juce::Justification::centred);
+    channelLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(channelLabel);
 
     stateLabel.setText("Idle", juce::dontSendNotification);
     stateLabel.setFont(juce::Font(11.0f));
     stateLabel.setJustificationType(juce::Justification::centred);
+    stateLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(stateLabel);
 
     //--------------------------------------------------------------------------
@@ -28,6 +30,7 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     // Secondary buttons
     clrButton.onClick = [this] { clrButtonClicked(); };
     clrButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
+    clrButton.setTooltip("Clear: erase this channel's recorded loop. [C] clears the active channel.");
     addAndMakeVisible(clrButton);
 
     ioButton.onClick = [this]
@@ -44,6 +47,8 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
         opts.resizable             = false;
         opts.launchAsync();
     };
+    ioButton.setTooltip(
+        "Routing: configure input source and output bus for this channel.");
     addAndMakeVisible(ioButton);
 
     fxButton.onClick = [this]
@@ -53,13 +58,15 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
         auto* dlg = new PluginManagerComponent(audioEngine, channelIndex);
         juce::DialogWindow::LaunchOptions opts;
         opts.content.setOwned(dlg);
-        opts.dialogTitle           = "FX — Ch " + juce::String(channelIndex + 1);
+        opts.dialogTitle           = "FX Ch " + juce::String(channelIndex + 1);
         opts.dialogBackgroundColour= juce::Colours::darkgrey;
         opts.escapeKeyTriggersCloseButton = true;
         opts.useNativeTitleBar     = false;
         opts.resizable             = false;
         opts.launchAsync();
     };
+    fxButton.setTooltip(
+        "FX: add, remove, or bypass VST/AU plugins in this channel's insert chain.");
     addAndMakeVisible(fxButton);
 
     //--------------------------------------------------------------------------
@@ -70,6 +77,12 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     monitorModeBox.addItem("While Active",    3);   // MonitorMode::WhenTrackActive (default)
     monitorModeBox.addItem("Always Off",      4);   // MonitorMode::Off
     monitorModeBox.setSelectedId(3, juce::dontSendNotification);
+    monitorModeBox.setTooltip(
+        "Monitor - when live input is passed through to output:\n"
+        "  Always On       - input always audible\n"
+        "  While Recording - input audible during REC / OVERDUB only\n"
+        "  While Active    - input audible only when this is the active channel\n"
+        "  Always Off      - input never passed through (tape-style)");
     monitorModeBox.onChange = [this] { monitorModeChanged(); };
     addAndMakeVisible(monitorModeBox);
 
@@ -87,11 +100,15 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     // Mute / Solo
     muteButton.setClickingTogglesState(true);
     muteButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::orange);
+    muteButton.setTooltip(
+        "Mute: silence this channel's output. Recording continues unaffected.");
     muteButton.onClick = [this] { muteClicked(); };
     addAndMakeVisible(muteButton);
 
     soloButton.setClickingTogglesState(true);
     soloButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::yellow);
+    soloButton.setTooltip(
+        "Solo: isolate this channel - all other non-soloed channels are silenced.");
     soloButton.onClick = [this] { soloClicked(); };
     addAndMakeVisible(soloButton);
 
@@ -178,6 +195,8 @@ void ChannelStripComponent::timerCallback()
     auto* channel = audioEngine.getChannel(channelIndex);
     if (!channel) return;
 
+    clrButton.setEnabled(channel_hasLoop());
+
     // Sync mute / solo buttons
     muteButton.setToggleState(channel->isMuted(), juce::dontSendNotification);
     soloButton.setToggleState(channel->isSolo(),  juce::dontSendNotification);
@@ -226,6 +245,41 @@ void ChannelStripComponent::updateMainButton()
 {
     auto* channel = audioEngine.getChannel(channelIndex);
     if (!channel) return;
+
+    // Count-in blink: flash before recording starts on this channel
+    if (audioEngine.isCountingIn() && audioEngine.getCountInPendingChannel() == channelIndex)
+    {
+        const bool blinkOn = (juce::Time::getMillisecondCounter() / 250) % 2 == 0;
+        mainButton.setButtonText("REC");
+        mainButton.setColour(juce::TextButton::buttonColourId,
+                             blinkOn ? juce::Colours::red : juce::Colour(0xFF550000));
+        return;
+    }
+
+    if (channel->hasPendingRecord())
+    {
+        mainButton.setButtonText("PEND REC");
+        mainButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFFAA4400));
+        return;
+    }
+    if (channel->hasPendingOverdub())
+    {
+        mainButton.setButtonText("PEND OVD");
+        mainButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFFAA6600));
+        return;
+    }
+    if (channel->hasPendingPlay())
+    {
+        mainButton.setButtonText("PEND PLY");
+        mainButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF447700));
+        return;
+    }
+    if (channel->hasPendingStop())
+    {
+        mainButton.setButtonText("PEND STP");
+        mainButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey.brighter());
+        return;
+    }
 
     const bool   overdubMode = audioEngine.isInOverdubMode();
     const auto   state       = channel->getState();
@@ -283,6 +337,17 @@ void ChannelStripComponent::mainButtonClicked()
     auto* channel = audioEngine.getChannel(channelIndex);
     if (!channel) return;
 
+    // Cancel pending latch action on second press
+    if (channel->hasPendingRecord() || channel->hasPendingOverdub() ||
+        channel->hasPendingPlay()   || channel->hasPendingStop())
+    {
+        Command cmd;
+        cmd.type         = CommandType::CancelPending;
+        cmd.channelIndex = channelIndex;
+        audioEngine.sendCommand(cmd);
+        return;
+    }
+
     const bool overdubMode = audioEngine.isInOverdubMode();
     const auto state       = channel->getState();
     const bool hasLoop     = channel->hasLoop();
@@ -324,23 +389,10 @@ void ChannelStripComponent::clrButtonClicked()
 {
     if (!channel_hasLoop()) return;
 
-    auto options = juce::MessageBoxOptions()
-        .withIconType(juce::MessageBoxIconType::WarningIcon)
-        .withTitle("Clear Channel")
-        .withMessage("Clear channel " + juce::String(channelIndex + 1) + "?")
-        .withButton("Clear")
-        .withButton("Cancel");
-
-    juce::AlertWindow::showAsync(options, [this](int result)
-    {
-        if (result == 1)
-        {
-            Command cmd;
-            cmd.type         = CommandType::ClearChannel;
-            cmd.channelIndex = channelIndex;
-            audioEngine.sendCommand(cmd);
-        }
-    });
+    Command cmd;
+    cmd.type         = CommandType::ClearChannel;
+    cmd.channelIndex = channelIndex;
+    audioEngine.sendCommand(cmd);
 }
 
 bool ChannelStripComponent::channel_hasLoop() const
@@ -398,6 +450,8 @@ void ChannelStripComponent::showContextMenu(const juce::MouseEvent&)
     menu.addItem(2, "MIDI Learn: Gain");
     menu.addItem(3, "MIDI Learn: Mute");
     menu.addItem(4, "MIDI Learn: Solo");
+    menu.addItem(5, "MIDI Learn: CLR");
+    menu.addItem(6, "MIDI Learn: Overdub");
 
     menu.showMenuAsync(juce::PopupMenu::Options(), [this](int id)
     {
@@ -407,6 +461,12 @@ void ChannelStripComponent::showContextMenu(const juce::MouseEvent&)
             case 2: showMidiLearnMenu(&gainSlider); break;
             case 3: showMidiLearnMenu(&muteButton); break;
             case 4: showMidiLearnMenu(&soloButton); break;
+            case 5:
+                audioEngine.getMidiLearnManager().startLearning(channelIndex, MidiControlTarget::Clear);
+                break;
+            case 6:
+                audioEngine.getMidiLearnManager().startLearning(channelIndex, MidiControlTarget::Overdub);
+                break;
             default: break;
         }
     });

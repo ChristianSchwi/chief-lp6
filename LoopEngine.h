@@ -5,22 +5,21 @@
 
 /**
  * @file LoopEngine.h
- * @brief Global loop engine managing playhead position and quantization
- * 
+ * @brief Global loop engine managing playhead position and loop length
+ *
  * This is the master clock for the entire looper application.
  * All 6 channels are synchronized to this global loop length and playhead.
  */
 
 //==============================================================================
 /**
- * @brief Global loop engine with sample-accurate playhead and quantization
- * 
+ * @brief Global loop engine with sample-accurate playhead
+ *
  * Key responsibilities:
  * - Maintain global playhead position (sample-based)
  * - Enforce global loop length (all channels same length)
- * - Provide beat quantization for recording start/stop
- * - Calculate loop length from BPM and beats
- * 
+ * - Calculate loop length from BPM and beats (metronome mode)
+ *
  * Thread-safety:
  * - Audio thread: reads atomics, advances playhead
  * - Message thread: writes atomics via commands
@@ -83,47 +82,15 @@ public:
         return (pos <= tolerance) || (pos >= length - tolerance);
     }
     
-    /**
-     * @brief Calculate if recording should start based on quantization
-     * @param currentSample Current playhead position
-     * @return true if this is a valid start point
-     */
-    bool shouldStartRecording(juce::int64 currentSample) const;
-    
-    /**
-     * @brief Get next quantized position from a given sample
-     * @param fromSample Starting sample position
-     * @return Next quantized sample position
-     */
-    juce::int64 getNextQuantizedPosition(juce::int64 fromSample) const;
-    
-    /**
-     * @brief Get samples remaining until next quantization point
-     * @param fromSample Starting sample position
-     * @return Number of samples until next quantized position
-     */
-    juce::int64 getSamplesUntilNextBeat(juce::int64 fromSample) const;
-    
-    /**
-     * @brief Check if current position is on a beat boundary
-     * @param tolerance Samples of tolerance
-     */
-    bool isOnBeat(int tolerance = 1) const;
-    
     //==============================================================================
     // Message Thread Interface (Non-Real-Time)
     //==============================================================================
-    
+
     /**
      * @brief Set loop length explicitly (in samples)
      * Called when first recording completes or from song load
      */
     void setLoopLength(juce::int64 lengthInSamples);
-    
-    /**
-     * @brief Enable/disable beat quantization
-     */
-    void setQuantizationEnabled(bool enabled);
     
     /**
      * @brief Set BPM for metronome mode
@@ -156,7 +123,7 @@ public:
     /**
      * @brief Get current sample rate
      */
-    double getSampleRate() const { return sampleRate; }
+    double getSampleRate() const { return sampleRate.load(std::memory_order_relaxed); }
     
     /**
      * @brief Get current BPM
@@ -168,11 +135,6 @@ public:
      */
     int getBeatsPerLoop() const { return beatsPerLoop.load(std::memory_order_relaxed); }
     
-    /**
-     * @brief Check if quantization is enabled
-     */
-    bool isQuantizationEnabled() const { return quantizationEnabled.load(std::memory_order_relaxed); }
-    
     //==============================================================================
     // Diagnostics
     //==============================================================================
@@ -182,19 +144,21 @@ public:
      */
     double getLoopLengthSeconds() const
     {
-        if (sampleRate <= 0.0)
+        const double sr = sampleRate.load(std::memory_order_relaxed);
+        if (sr <= 0.0)
             return 0.0;
-        return static_cast<double>(getLoopLength()) / sampleRate;
+        return static_cast<double>(getLoopLength()) / sr;
     }
-    
+
     /**
      * @brief Get current playhead position in seconds
      */
     double getPlayheadSeconds() const
     {
-        if (sampleRate <= 0.0)
+        const double sr = sampleRate.load(std::memory_order_relaxed);
+        if (sr <= 0.0)
             return 0.0;
-        return static_cast<double>(getCurrentPlayhead()) / sampleRate;
+        return static_cast<double>(getCurrentPlayhead()) / sr;
     }
     
 private:
@@ -202,18 +166,17 @@ private:
     // Atomic state (shared between threads)
     std::atomic<juce::int64> playheadPosition{0};
     std::atomic<juce::int64> loopLengthSamples{0};
-    std::atomic<bool> quantizationEnabled{false};
     std::atomic<double> bpm{120.0};
     std::atomic<int> beatsPerLoop{4};
     
-    // Non-atomic (only accessed from message thread or during setup)
-    double sampleRate{44100.0};
+    // Atomic: written from device-setup thread, read from audio thread
+    // (calculateLoopLengthFromBPM is called via command processing on audio thread)
+    std::atomic<double> sampleRate{44100.0};
     juce::int64 samplesPerBeat{0};
     
     //==============================================================================
     // Internal helpers
     void updateSamplesPerBeat();
-    juce::int64 quantizeToNearestBeat(juce::int64 samplePosition) const;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoopEngine)
 };

@@ -52,7 +52,7 @@ struct ChannelConfig
     RoutingConfig routing;
     
     float gainDb{0.0f};
-    MonitorMode monitorMode{MonitorMode::AlwaysOn};
+    MonitorMode monitorMode{MonitorMode::WhenTrackActive};  // matches Channel default
     bool muted{false};
     bool solo{false};
     
@@ -88,7 +88,7 @@ struct Song
     juce::int64 loopLengthSamples{0};
     double bpm{120.0};
     int beatsPerLoop{4};
-    bool quantizationEnabled{true};
+    bool latchModeEnabled{false};
     
     // Channel configurations
     std::array<ChannelConfig, 6> channels;

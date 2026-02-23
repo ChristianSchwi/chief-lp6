@@ -15,12 +15,16 @@ VSTiChannel::VSTiChannel(int index)
 
 void VSTiChannel::setVSTi(std::unique_ptr<juce::AudioPluginInstance> instrument)
 {
+    // Block audio thread from accessing vsti during the swap
+    vstiCrashed.store(true, std::memory_order_release);
+    juce::Thread::sleep(10);
+
     // Release old VSTi if present
     if (vsti)
     {
         vsti->releaseResources();
     }
-    
+
     // Install new VSTi
     vsti = std::move(instrument);
     vstiCrashed.store(false, std::memory_order_release);
@@ -45,12 +49,13 @@ void VSTiChannel::setVSTi(std::unique_ptr<juce::AudioPluginInstance> instrument)
 
 void VSTiChannel::removeVSTi()
 {
-    if (vsti)
-    {
-        vsti->releaseResources();
-        vsti.reset();
-        DBG("VSTi removed from channel " + juce::String(channelIndex));
-    }
+    if (!vsti) return;
+    // Block audio thread from accessing vsti during removal
+    vstiCrashed.store(true, std::memory_order_release);
+    juce::Thread::sleep(10);
+    vsti->releaseResources();
+    vsti.reset();
+    DBG("VSTi removed from channel " + juce::String(channelIndex));
 }
 
 void VSTiChannel::setMIDIChannelFilter(int channel)
@@ -129,85 +134,77 @@ void VSTiChannel::processBlock(const float* const* inputChannelData,
 {
     checkAndExecutePendingStop(playheadPosition, loopLength, numSamples);
 
-    // Clear working buffer
+    // Clear all working buffers
     workingBuffer.clear(0, numSamples);
     vstiOutputBuffer.clear(0, numSamples);
+    fxBuffer.clear(0, numSamples);
     filteredMidiBuffer.clear();
 
-    // Check if muted
-    const bool isMutedNow = muted.load(std::memory_order_relaxed);
+    // Check if muted (user mute OR silenced by another channel's solo)
+    const bool isMutedNow = muted.load(std::memory_order_relaxed)
+                         || soloMuted.load(std::memory_order_relaxed);
     const ChannelState currentState = state.load(std::memory_order_relaxed);
-    
+
     //==========================================================================
     // 1. FILTER MIDI BY CHANNEL (if configured)
     //==========================================================================
     const int midiFilter = routing.midiChannelFilter;
     filterMIDI(midiBuffer, filteredMidiBuffer, midiFilter);
-    
+
     //==========================================================================
-    // 2. PROCESS VSTi WITH MIDI
+    // 2. PROCESS VSTi → vstiOutputBuffer (dry instrument signal)
     //==========================================================================
     processVSTi(vstiOutputBuffer, filteredMidiBuffer, numSamples);
-    
-    // Copy VSTi output to working buffer
-    workingBuffer.makeCopyOf(vstiOutputBuffer, true);
-    
+
+    // Copy dry VSTi output to workingBuffer (allocation-free, audio-thread safe)
+    const int chsToCopy = juce::jmin(workingBuffer.getNumChannels(),
+                                     vstiOutputBuffer.getNumChannels());
+    for (int ch = 0; ch < chsToCopy; ++ch)
+        workingBuffer.copyFrom(ch, 0, vstiOutputBuffer, ch, 0, numSamples);
+
     //==========================================================================
-    // 3. PROCESS FX CHAIN
-    //==========================================================================
-    juce::MidiBuffer emptyMidi;  // FX get no MIDI (instrument already processed it)
-    processFXChain(workingBuffer, numSamples, emptyMidi);
-    
-    //==========================================================================
-    // 4. LIVE MONITORING (Always active for VSTi)
-    //==========================================================================
-    // VSTi channels always output live audio (for jamming over loops)
-    if (!isMutedNow)
-    {
-        routeOutput(outputChannelData, workingBuffer, numOutputChannels, numSamples);
-    }
-    
-    //==========================================================================
-    // 5. RECORDING / OVERDUBBING
+    // 3. RECORD DRY SIGNAL (before FX — loop always stores clean audio)
     //==========================================================================
     if (currentState == ChannelState::Recording)
-    {
-        // First recording pass - replace any existing content.
-        // loopLength may still be 0 in free mode; recordToLoop guards against invalid state.
         recordToLoop(workingBuffer, playheadPosition, numSamples, false);
-    }
     else if (currentState == ChannelState::Overdubbing && loopLength > 0)
-    {
-        // Overdub - add to existing content
         recordToLoop(workingBuffer, playheadPosition, numSamples, true);
+
+    //==========================================================================
+    // 4. BUILD OUTPUT MIX IN fxBuffer
+    //    Monitoring: add dry VSTi; Playback: add loop signal with gain.
+    //    Both paths are combined before FX so the chain runs exactly once.
+    //==========================================================================
+    if (shouldMonitor())
+    {
+        for (int ch = 0; ch < fxBuffer.getNumChannels(); ++ch)
+            fxBuffer.addFrom(ch, 0, workingBuffer, ch, 0, numSamples);
     }
-    
-    //==========================================================================
-    // 6. PLAYBACK FROM LOOP
-    //==========================================================================
-    if ((currentState == ChannelState::Playing || 
+
+    if ((currentState == ChannelState::Playing ||
          currentState == ChannelState::Overdubbing) &&
         loopLength > 0)
     {
-        // Clear working buffer for playback
+        // Reuse workingBuffer as a temporary read target for the loop
         workingBuffer.clear(0, numSamples);
-        
-        // Read from loop buffer
         playFromLoop(workingBuffer, playheadPosition, numSamples);
-        
-        //======================================================================
-        // 7. APPLY GAIN
-        //======================================================================
         applyGain(workingBuffer, numSamples);
-        
-        //======================================================================
-        // 8. ROUTE TO OUTPUT (additional to live monitoring)
-        //======================================================================
-        if (!isMutedNow)
-        {
-            routeOutput(outputChannelData, workingBuffer, numOutputChannels, numSamples);
-        }
+
+        for (int ch = 0; ch < fxBuffer.getNumChannels(); ++ch)
+            fxBuffer.addFrom(ch, 0, workingBuffer, ch, 0, numSamples);
     }
+
+    //==========================================================================
+    // 5. PROCESS FX CHAIN (applied once to combined output signal)
+    //==========================================================================
+    juce::MidiBuffer emptyMidi;
+    processFXChain(fxBuffer, numSamples, emptyMidi);
+
+    //==========================================================================
+    // 6. ROUTE TO OUTPUT
+    //==========================================================================
+    if (!isMutedNow)
+        routeOutput(outputChannelData, fxBuffer, numOutputChannels, numSamples);
 }
 
 //==============================================================================
@@ -272,17 +269,21 @@ void VSTiChannel::processVSTi(juce::AudioBuffer<float>& outputBuffer,
     // Process VSTi with crash protection
     try
     {
-        vsti->processBlock(outputBuffer, midiBuffer);
+        // Pass a non-owning view of exactly numSamples so the plugin advances its
+        // internal state (envelopes, LFOs, delay lines) by exactly one real block,
+        // not by the over-allocated buffer size (which would be 2× too fast).
+        juce::AudioBuffer<float> view (outputBuffer.getArrayOfWritePointers(),
+                                       outputBuffer.getNumChannels(),
+                                       numSamples);
+        vsti->processBlock(view, midiBuffer);
     }
     catch (...)
     {
         // VSTi crashed - mark as crashed and clear output
         vstiCrashed.store(true, std::memory_order_release);
         outputBuffer.clear(0, numSamples);
-        
+
         DBG("VSTi crashed in channel " + juce::String(channelIndex) + "!");
-        
-        // Could trigger async notification to GUI here
     }
 }
 

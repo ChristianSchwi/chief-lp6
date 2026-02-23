@@ -29,10 +29,20 @@ enum class MidiControlTarget
     Play,
     Overdub,
     Clear,
-    Gain,        // CC → -60..+12 dB
+    Gain,                // CC → -60..+12 dB
     Mute,
     Solo,
-    MonitorMode  // CC → 4 Modi
+    MonitorMode,         // CC → 4 Modi
+    GlobalPlayStop,      // toggle transport play/stop
+    NextChannel,         // select next channel (global)
+    PrevChannel,         // select previous channel (global)
+    NextSong,            // navigate to next song in show (global)
+    PrevSong,            // navigate to previous song in show (global)
+    Panic,               // emergency stop (global)
+    MetronomeToggle,     // toggle metronome on/off (global)
+    GlobalOverdubToggle, // toggle global overdub mode (global)
+    LatchModeToggle,     // toggle latch mode (global)
+    AutoStartToggle      // toggle auto-start (global)
 };
 
 //==============================================================================
@@ -109,6 +119,10 @@ public:
 
     /** Callback wenn eine neue Zuweisung abgeschlossen wurde */
     std::function<void(const MidiMapping&)> onAssignmentMade;
+
+    /** Callbacks for global song navigation (set by ShowComponent) */
+    std::function<void()> onNextSong;
+    std::function<void()> onPrevSong;
 
     //==========================================================================
     // MIDI-Eingabe (vom Audio/MIDI-Thread aufgerufen — thread-safe)

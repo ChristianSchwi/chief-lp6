@@ -70,30 +70,48 @@ juce::String AudioEngine::initialiseAudio(int inputChannels,
                                           double sampleRate,
                                           int bufferSize)
 {
-    juce::AudioDeviceManager::AudioDeviceSetup setup;
-    deviceManager.getAudioDeviceSetup(setup);
+    // Try to restore previously saved device settings
+    std::unique_ptr<juce::XmlElement> savedXml;
+    const auto settingsFile = getAudioSettingsFile();
+    if (settingsFile.existsAsFile())
+    {
+        savedXml = juce::parseXML(settingsFile);
+        DBG("Audio settings: loading from " + settingsFile.getFullPathName());
+    }
 
-    setup.inputChannels .setRange(0, inputChannels,  true);
-    setup.outputChannels.setRange(0, outputChannels, true);
+    juce::String error;
+    if (savedXml)
+    {
+        // Restore from saved state (ignores the setup struct — device manager handles it)
+        error = deviceManager.initialise(inputChannels, outputChannels,
+                                         savedXml.get(),
+                                         true,          // select default on failure
+                                         juce::String(),
+                                         nullptr);
+    }
+    else
+    {
+        // No saved settings — use provided defaults
+        juce::AudioDeviceManager::AudioDeviceSetup setup;
+        deviceManager.getAudioDeviceSetup(setup);
+        setup.inputChannels .setRange(0, inputChannels,  true);
+        setup.outputChannels.setRange(0, outputChannels, true);
+        if (sampleRate > 0.0) setup.sampleRate = sampleRate;
+        if (bufferSize  > 0)  setup.bufferSize  = bufferSize;
 
-    if (sampleRate > 0.0) setup.sampleRate = sampleRate;
-    if (bufferSize  > 0)  setup.bufferSize  = bufferSize;
+        error = deviceManager.initialise(inputChannels, outputChannels,
+                                         nullptr,
+                                         true,
+                                         juce::String(),
+                                         &setup);
+    }
 
-    const juce::String error = deviceManager.initialise(inputChannels,
-                                                        outputChannels,
-                                                        nullptr,
-                                                        true,
-                                                        juce::String(),
-                                                        &setup);
     if (error.isEmpty())
     {
         isInitialised.store(true, std::memory_order_release);
         openMidiInputs();
-        DBG("Audio engine initialized: " +
-            juce::String(currentSampleRate) + " Hz, " +
-            juce::String(currentBufferSize) + " samples, " +
-            juce::String(numInputChannels) + " in / " +
-            juce::String(numOutputChannels) + " out");
+        // Note: currentSampleRate/currentBufferSize are populated in
+        // audioDeviceAboutToStart(), which is where the device-ready log is printed.
     }
     else
     {
@@ -101,6 +119,26 @@ juce::String AudioEngine::initialiseAudio(int inputChannels,
     }
 
     return error;
+}
+
+juce::File AudioEngine::getAudioSettingsFile() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("chief")
+        .getChildFile("AudioSettings.xml");
+}
+
+bool AudioEngine::saveAudioSettings() const
+{
+    auto xml = deviceManager.createStateXml();
+    if (!xml) return false;
+
+    const auto file = getAudioSettingsFile();
+    file.getParentDirectory().createDirectory();
+    const bool ok = xml->writeTo(file);
+    DBG("Audio settings " + juce::String(ok ? "saved" : "FAILED to save") +
+        ": " + file.getFullPathName());
+    return ok;
 }
 
 //==============================================================================
@@ -118,6 +156,13 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 
     // Loop engine
     loopEngine->setSampleRate(currentSampleRate);
+
+    // If metronome mode is active, recalculate the loop length for the new
+    // sample rate.  Free-mode loops (length set from a first recording) are
+    // left untouched — their sample count is sample-rate-independent data that
+    // was captured at this same rate.
+    if (metronome->getEnabled())
+        loopEngine->calculateLoopLengthFromBPM();
 
     // Metronome — prepare (do NOT re-create here, that would reset config)
     metronome->setBPM(loopEngine->getBPM());
@@ -181,32 +226,39 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     bool playing = isPlayingFlag.load(std::memory_order_relaxed);
     loopEngine->processBlock(numSamples, playing);
 
-    //--- 3b. STOP RECORDING IF TRANSPORT IS NOT RUNNING -----------------------
-    // Prevents recording channels from overwriting loop data at a frozen playhead.
+    //--- 3b. STOP ALL CHANNELS WHEN TRANSPORT IS NOT RUNNING ------------------
     if (!playing)
     {
         for (auto& ch : channels)
         {
-            if (ch)
+            if (!ch) continue;
+
+            auto cs = ch->getState();
+
+            // Stop recording first (transitions state to Playing)
+            if (cs == ChannelState::Recording || cs == ChannelState::Overdubbing)
             {
-                const auto cs = ch->getState();
-                if (cs == ChannelState::Recording || cs == ChannelState::Overdubbing)
-                    ch->stopRecording();
+                ch->stopRecording();
+                cs = ch->getState();   // update after transition
             }
+
+            // Then stop playing (including channels that just finished recording)
+            if (cs == ChannelState::Playing)
+                ch->stopPlayback();
         }
 
-        // Cancel pending count-in and autostart when transport stops
-        if (countInActive)
+        // Cancel pending count-in and autostart
+        if (countInActive.load(std::memory_order_relaxed))
         {
-            countInActive        = false;
-            pendingRecordChannel = -1;
+            countInActive.store(false, std::memory_order_release);
+            pendingRecordChannel.store(-1, std::memory_order_release);
         }
         autoStartTriggered = false;
     }
 
     //--- 3c. AUTO-START THRESHOLD CHECK ----------------------------------------
     if (autoStartEnabled.load(std::memory_order_relaxed) && !playing && !autoStartTriggered
-        && !countInActive)
+        && !countInActive.load(std::memory_order_relaxed))
     {
         const float threshold = autoStartThresholdLinear.load(std::memory_order_relaxed);
         float peak = 0.0f;
@@ -229,22 +281,23 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     }
 
     //--- 3d. COUNT-IN COUNTDOWN ------------------------------------------------
-    if (countInActive)
+    if (countInActive.load(std::memory_order_relaxed))
     {
         countInSamplesRemaining -= numSamples;
         if (countInSamplesRemaining <= 0)
         {
-            countInActive = false;
-            if (pendingRecordChannel >= 0 && pendingRecordChannel < 6)
+            countInActive.store(false, std::memory_order_release);
+            const int pch = pendingRecordChannel.load(std::memory_order_relaxed);
+            if (pch >= 0 && pch < 6)
             {
-                if (auto* ch = channels[pendingRecordChannel].get())
+                if (auto* ch = channels[pch].get())
                 {
                     if (!metronome->getEnabled() && loopEngine->getLoopLength() == 0)
                         loopEngine->resetPlayhead();
                     ch->startRecording(false);
                 }
             }
-            pendingRecordChannel = -1;
+            pendingRecordChannel.store(-1, std::memory_order_release);
         }
     }
 
@@ -253,6 +306,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     // audio thread reads here via removeNextBlockOfMessages()
     juce::MidiBuffer midiBuffer;
     midiCollector.removeNextBlockOfMessages(midiBuffer, numSamples);
+
+    //--- 4b. SOLO ENFORCEMENT + ACTIVE-CHANNEL FLAG ----------------------------
+    {
+        bool anySolo = false;
+        for (auto& ch : channels)
+            if (ch && ch->isSolo()) { anySolo = true; break; }
+
+        const int activeIdx = activeChannelIndex.load(std::memory_order_relaxed);
+        for (int i = 0; i < 6; ++i)
+        {
+            if (!channels[i]) continue;
+            channels[i]->setSoloMuted(anySolo && !channels[i]->isSolo());
+            channels[i]->setIsActiveChannel(i == activeIdx);
+        }
+    }
 
     //--- 5. PROCESS CHANNELS ---------------------------------------------------
     const juce::int64 playheadPos = loopEngine->getCurrentPlayhead();
@@ -328,12 +396,6 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
             break;
         }
 
-        case CommandType::SetQuantization:
-        {
-            loopEngine->setQuantizationEnabled(cmd.boolValue);
-            break;
-        }
-
         case CommandType::ResetPlayhead:
         {
             loopEngine->resetPlayhead();
@@ -399,7 +461,14 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
             isPlayingFlag.store(false, std::memory_order_release);
             loopEngine->resetPlayhead();
             for (auto& ch : channels)
-                if (ch) ch->stopPlayback();
+            {
+                if (!ch) continue;
+                const auto cs = ch->getState();
+                if (cs == ChannelState::Recording || cs == ChannelState::Overdubbing)
+                    ch->stopRecording();   // preserves loopHasContent
+                else if (cs == ChannelState::Playing)
+                    ch->stopPlayback();
+            }
             break;
         }
 
@@ -420,36 +489,47 @@ void AudioEngine::processChannelCommand(const Command& cmd)
     {
         case CommandType::StartRecord:
         {
-            // Auto-start transport so the playhead advances (needed for count-in + recording)
+            // Auto-start transport so the playhead advances
             isPlayingFlag.store(true, std::memory_order_release);
 
-            const int ci = countInBeats.load(std::memory_order_relaxed);
-            if (ci > 0 && !countInActive)
+            const juce::int64 loopLen = loopEngine->getLoopLength();
+            const bool latch = latchMode.load(std::memory_order_relaxed);
+
+            if (latch && loopLen > 0)
             {
-                // Count-in phase: transport runs (metronome clicks), recording deferred
-                const double bpm = loopEngine->getBPM();
-                const double spb = (60.0 / juce::jmax(1.0, bpm)) * currentSampleRate;
-                countInSamplesRemaining = static_cast<juce::int64>(
-                    juce::jmax(1, static_cast<int>(ci * spb)));
-                countInActive        = true;
-                pendingRecordChannel = cmd.channelIndex;
-                DBG("Count-in: " + juce::String(ci) + " beat(s) = " +
-                    juce::String(countInSamplesRemaining) + " samples");
+                // Latch mode: defer recording start to next loop boundary
+                channel->requestRecordAtLoopEnd();
             }
             else
             {
-                // Immediate recording
-                if (!metronome->getEnabled() && loopEngine->getLoopLength() == 0)
-                    loopEngine->resetPlayhead();
-                channel->startRecording(false);
+                const int ci = countInBeats.load(std::memory_order_relaxed);
+                if (ci > 0 && !countInActive)
+                {
+                    // Count-in phase: transport runs, recording deferred
+                    const double bpm = loopEngine->getBPM();
+                    const double spb = (60.0 / juce::jmax(1.0, bpm)) * currentSampleRate;
+                    countInSamplesRemaining = static_cast<juce::int64>(
+                        juce::jmax(1, static_cast<int>(ci * spb)));
+                    countInActive.store(true, std::memory_order_release);
+                    pendingRecordChannel.store(cmd.channelIndex, std::memory_order_release);
+                    DBG("Count-in: " + juce::String(ci) + " beat(s) = " +
+                        juce::String(countInSamplesRemaining) + " samples");
+                }
+                else
+                {
+                    if (!metronome->getEnabled() && loopLen == 0)
+                        loopEngine->resetPlayhead();
+                    channel->startRecording(false);
+                }
             }
             break;
         }
 
         case CommandType::StopRecord:
         {
-            // Freier Modus: erste beendete Aufnahme setzt globale Loop-Länge
-            if (!metronome->getEnabled() && loopEngine->getLoopLength() == 0)
+            const juce::int64 loopLen = loopEngine->getLoopLength();
+            // Free mode: first finished recording sets the global loop length
+            if (!metronome->getEnabled() && loopLen == 0)
             {
                 const juce::int64 recorded = loopEngine->getCurrentPlayhead();
                 if (recorded > 0)
@@ -462,41 +542,54 @@ void AudioEngine::processChannelCommand(const Command& cmd)
                 loopEngine->resetPlayhead();
                 channel->stopRecording();
             }
-            else
+            else if (latchMode.load(std::memory_order_relaxed))
             {
                 channel->requestStopAtLoopEnd();
+            }
+            else
+            {
+                channel->stopRecording();
             }
             break;
         }
 
         case CommandType::StartPlayback:
         {
-            channel->startPlayback();
+            const juce::int64 loopLen = loopEngine->getLoopLength();
+            if (latchMode.load(std::memory_order_relaxed) && loopLen > 0
+                && isPlayingFlag.load(std::memory_order_relaxed))
+                channel->requestPlayAtLoopEnd();
+            else
+                channel->startPlayback();
             break;
         }
 
         case CommandType::StopPlayback:
         {
-            if (loopEngine->getLoopLength() == 0)
-                channel->stopPlayback();
-            else
+            if (latchMode.load(std::memory_order_relaxed) && loopEngine->getLoopLength() > 0)
                 channel->requestStopAtLoopEnd();
+            else
+                channel->stopPlayback();
             break;
         }
 
         case CommandType::StartOverdub:
         {
             isPlayingFlag.store(true, std::memory_order_release);
-            channel->startRecording(true);
+            const juce::int64 loopLen = loopEngine->getLoopLength();
+            if (latchMode.load(std::memory_order_relaxed) && loopLen > 0)
+                channel->requestOverdubAtLoopEnd();
+            else
+                channel->startRecording(true);
             break;
         }
 
         case CommandType::StopOverdub:
         {
-            if (loopEngine->getLoopLength() == 0)
-                channel->stopRecording();
-            else
+            if (latchMode.load(std::memory_order_relaxed) && loopEngine->getLoopLength() > 0)
                 channel->requestStopAtLoopEnd();
+            else
+                channel->stopRecording();
             break;
         }
 
@@ -561,8 +654,19 @@ void AudioEngine::processChannelCommand(const Command& cmd)
         case CommandType::ClearChannel:
         {
             channel->clearLoop();
+            // In free mode, reset the global loop length when all channels are empty
+            // so the next first recording can establish a fresh loop length.
+            if (!metronome->getEnabled() && !hasAnyRecordings())
+            {
+                loopEngine->setLoopLength(0);
+                loopEngine->resetPlayhead();
+            }
             break;
         }
+
+        case CommandType::CancelPending:
+            channel->clearPendingActions();
+            break;
 
         default:
             DBG("Unknown channel command: " + juce::String(static_cast<int>(cmd.type)));
@@ -586,8 +690,11 @@ bool AudioEngine::sendCommand(const Command& cmd)
 
 void AudioEngine::setPlaying(bool shouldPlay)
 {
+    // When starting play with nothing recorded, always start from position 0.
+    if (shouldPlay && !hasAnyRecordings())
+        loopEngine->resetPlayhead();
+
     isPlayingFlag.store(shouldPlay, std::memory_order_release);
-  //  DBG(shouldPlay ? "Playback started" : "Playback stopped");
 }
 
 void AudioEngine::setOverdubMode(bool enabled)
@@ -653,15 +760,27 @@ void AudioEngine::setChannelType(int index, ChannelType type)
     const bool wasPlaying = isPlaying();
     if (wasPlaying) setPlaying(false);
 
-    channels[index] = (type == ChannelType::Audio)
+    // Wait for the audio thread to finish any in-flight processBlock() on the old
+    // channel before we destroy it.  setPlaying(false) only sets a flag — the IO
+    // callback continues running.  One block period is enough.
+    const int blockMs = (currentBufferSize > 0 && currentSampleRate > 0)
+                      ? static_cast<int>(currentBufferSize * 1000.0 / currentSampleRate) + 5
+                      : 15;
+    juce::Thread::sleep(blockMs);
+
+    // Create and fully prepare the new channel BEFORE installing it, so the audio
+    // thread never encounters it with uninitialised (zero-size) buffers.
+    auto newChannel = (type == ChannelType::Audio)
                       ? std::unique_ptr<Channel>(std::make_unique<AudioChannel>(index))
                       : std::unique_ptr<Channel>(std::make_unique<VSTiChannel>(index));
 
     if (isInitialised.load(std::memory_order_relaxed))
     {
         const juce::int64 maxSamples = static_cast<juce::int64>(600.0 * currentSampleRate);
-        channels[index]->prepareToPlay(currentSampleRate, currentBufferSize, maxSamples);
+        newChannel->prepareToPlay(currentSampleRate, currentBufferSize, maxSamples);
     }
+
+    channels[index] = std::move(newChannel);
 
     if (wasPlaying) setPlaying(true);
 
@@ -695,12 +814,6 @@ void AudioEngine::loadPluginAsync(int channelIndex,
         DBG("loadPluginAsync: invalid slot " + juce::String(slotIndex));
         return;
     }
-    if (isPlayingFlag.load(std::memory_order_relaxed))
-    {
-        DBG("loadPluginAsync: blocked — engine is playing (Spec §10)");
-        return;
-    }
-
     auto description = pluginHost->findPluginByIdentifier(pluginIdentifier);
     if (description.name.isEmpty())
     {
@@ -717,12 +830,15 @@ void AudioEngine::loadPluginAsync(int channelIndex,
         description,
         currentSampleRate,
         currentBufferSize,
-        [this, channelIndex, slotIndex, stateBase64]
+        [this, channelIndex, slotIndex, stateBase64, descName = description.name]
         (std::unique_ptr<juce::AudioPluginInstance> plugin, const juce::String& error)
         {
             if (!plugin)
             {
                 DBG("loadPluginAsync: failed — " + error);
+                if (onPluginLoadError)
+                    onPluginLoadError(channelIndex, slotIndex,
+                                      "Could not load: " + descName);
                 return;
             }
 
@@ -769,16 +885,14 @@ void AudioEngine::removePlugin(int channelIndex, int slotIndex)
     if (channelIndex < 0 || channelIndex >= 6) return;
     auto* channel = channels[channelIndex].get();
     if (!channel) return;
-    if (isPlayingFlag.load(std::memory_order_relaxed))
-    {
-        DBG("removePlugin: blocked — engine is playing (Spec §10)");
-        return;
-    }
 
-    if (slotIndex == -1 && channel->getType() == ChannelType::VSTi)
+    if (slotIndex == -1)
     {
-        static_cast<VSTiChannel*>(channel)->removeVSTi();
-        DBG("VSTi removed from ch " + juce::String(channelIndex));
+        if (channel->getType() == ChannelType::VSTi)
+        {
+            static_cast<VSTiChannel*>(channel)->removeVSTi();
+            DBG("VSTi removed from ch " + juce::String(channelIndex));
+        }
     }
     else if (slotIndex >= 0 && slotIndex < 3)
     {
@@ -814,9 +928,8 @@ void AudioEngine::setMetronomeEnabled(bool enabled)
 
 void AudioEngine::setMetronomeMuted(bool muted)
 {
-    // Direkt per Atomic + Command für Audio-Thread
-    metronome->setMuted(muted);
-
+    // Route via command queue only — the audio thread applies the change.
+    // A direct message-thread write would race with the audio thread reading isMuted.
     Command cmd;
     cmd.type      = CommandType::SetMetronomeMute;
     cmd.boolValue = muted;
@@ -832,6 +945,16 @@ void AudioEngine::setMetronomeOutput(int leftChannel, int rightChannel)
     cmd.intValue1 = leftChannel;
     cmd.intValue2 = rightChannel;
     sendCommand(cmd);
+}
+
+void AudioEngine::setBeatsPerBar(int n)
+{
+    metronome->setBeatsPerBar(n);
+}
+
+int AudioEngine::getBeatsPerBar() const
+{
+    return metronome->getBeatsPerBar();
 }
 
 //==============================================================================

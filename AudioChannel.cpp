@@ -21,74 +21,63 @@ void AudioChannel::processBlock(const float* const* inputChannelData,
 {
     checkAndExecutePendingStop(playheadPosition, loopLength, numSamples);
 
-    // Clear working buffer
+    // Clear working and output-mix buffers
     workingBuffer.clear(0, numSamples);
+    fxBuffer.clear(0, numSamples);
 
-    // Check if muted
-    const bool isMutedNow = muted.load(std::memory_order_relaxed);
+    // Check if muted (user mute OR silenced by another channel's solo)
+    const bool isMutedNow = muted.load(std::memory_order_relaxed)
+                         || soloMuted.load(std::memory_order_relaxed);
     const ChannelState currentState = state.load(std::memory_order_relaxed);
-    
+
     //==========================================================================
-    // 1. ROUTE INPUT FROM HARDWARE
+    // 1. ROUTE INPUT FROM HARDWARE (dry signal → workingBuffer)
     //==========================================================================
     routeInput(inputChannelData, numInputChannels, numSamples);
-    
+
     //==========================================================================
-    // 2. PROCESS FX CHAIN
-    //==========================================================================
-    juce::MidiBuffer emptyMidi;  // Audio channels don't use MIDI
-    processFXChain(workingBuffer, numSamples, emptyMidi);
-    
-    //==========================================================================
-    // 3. MONITORING (Post-FX)
-    //==========================================================================
-    if (shouldMonitor() && !isMutedNow)
-    {
-        // Monitor signal goes to output
-        routeOutput(outputChannelData, workingBuffer, numOutputChannels, numSamples);
-    }
-    
-    //==========================================================================
-    // 4. RECORDING / OVERDUBBING
+    // 2. RECORD DRY SIGNAL (before FX — loop always stores clean audio)
     //==========================================================================
     if (currentState == ChannelState::Recording)
-    {
-        // First recording pass - replace any existing content.
-        // loopLength may still be 0 in free mode; recordToLoop guards against invalid state.
         recordToLoop(workingBuffer, playheadPosition, numSamples, false);
-    }
     else if (currentState == ChannelState::Overdubbing && loopLength > 0)
-    {
-        // Overdub - add to existing content
         recordToLoop(workingBuffer, playheadPosition, numSamples, true);
+
+    //==========================================================================
+    // 3. BUILD OUTPUT MIX IN fxBuffer
+    //    Monitoring: add dry input; Playback: add loop signal with gain.
+    //    Both paths are combined before FX so the chain runs exactly once.
+    //==========================================================================
+    if (shouldMonitor())
+    {
+        for (int ch = 0; ch < fxBuffer.getNumChannels(); ++ch)
+            fxBuffer.addFrom(ch, 0, workingBuffer, ch, 0, numSamples);
     }
-    
-    //==========================================================================
-    // 5. PLAYBACK FROM LOOP
-    //==========================================================================
-    if ((currentState == ChannelState::Playing || 
+
+    if ((currentState == ChannelState::Playing ||
          currentState == ChannelState::Overdubbing) &&
         loopLength > 0)
     {
-        // Clear working buffer for playback
+        // Reuse workingBuffer as a temporary read target for the loop
         workingBuffer.clear(0, numSamples);
-        
-        // Read from loop buffer
         playFromLoop(workingBuffer, playheadPosition, numSamples);
-        
-        //======================================================================
-        // 6. APPLY GAIN
-        //======================================================================
         applyGain(workingBuffer, numSamples);
-        
-        //======================================================================
-        // 7. ROUTE TO OUTPUT
-        //======================================================================
-        if (!isMutedNow)
-        {
-            routeOutput(outputChannelData, workingBuffer, numOutputChannels, numSamples);
-        }
+
+        for (int ch = 0; ch < fxBuffer.getNumChannels(); ++ch)
+            fxBuffer.addFrom(ch, 0, workingBuffer, ch, 0, numSamples);
     }
+
+    //==========================================================================
+    // 4. PROCESS FX CHAIN (applied once to combined output signal)
+    //==========================================================================
+    juce::MidiBuffer emptyMidi;
+    processFXChain(fxBuffer, numSamples, emptyMidi);
+
+    //==========================================================================
+    // 5. ROUTE TO OUTPUT
+    //==========================================================================
+    if (!isMutedNow)
+        routeOutput(outputChannelData, fxBuffer, numOutputChannels, numSamples);
 }
 
 //==============================================================================
