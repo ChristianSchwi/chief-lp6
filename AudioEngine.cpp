@@ -15,7 +15,10 @@ AudioEngine::AudioEngine()
     midiLearnManager = std::make_unique<MidiLearnManager>(*this);
 
     for (int i = 0; i < 6; ++i)
-        channels[i] = std::make_unique<AudioChannel>(i);
+    {
+        channels[i]     = std::make_unique<AudioChannel>(i);
+        channelNames[i] = "CH " + juce::String(i + 1);
+    }
 
     deviceManager.addAudioCallback(this);
 }
@@ -157,13 +160,6 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     // Loop engine
     loopEngine->setSampleRate(currentSampleRate);
 
-    // If metronome mode is active, recalculate the loop length for the new
-    // sample rate.  Free-mode loops (length set from a first recording) are
-    // left untouched — their sample count is sample-rate-independent data that
-    // was captured at this same rate.
-    if (metronome->getEnabled())
-        loopEngine->calculateLoopLengthFromBPM();
-
     // Metronome — prepare (do NOT re-create here, that would reset config)
     metronome->setBPM(loopEngine->getBPM());
     metronome->prepareToPlay(currentSampleRate);
@@ -224,6 +220,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
 
     //--- 3. ADVANCE PLAYHEAD ---------------------------------------------------
     bool playing = isPlayingFlag.load(std::memory_order_relaxed);
+
+    // Capture playhead BEFORE advancing so channels and metronome see the
+    // start-of-block position.  Without this, block 0 passes playhead=512
+    // instead of 0 — the very first beat click is never fired.
+    const juce::int64 playheadPos = loopEngine->getCurrentPlayhead();
+    const juce::int64 loopLen     = loopEngine->getLoopLength();
+
     loopEngine->processBlock(numSamples, playing);
 
     //--- 3b. STOP ALL CHANNELS WHEN TRANSPORT IS NOT RUNNING ------------------
@@ -323,9 +326,6 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     }
 
     //--- 5. PROCESS CHANNELS ---------------------------------------------------
-    const juce::int64 playheadPos = loopEngine->getCurrentPlayhead();
-    const juce::int64 loopLen     = loopEngine->getLoopLength();
-
     for (auto& channel : channels)
     {
         if (channel)
@@ -374,9 +374,8 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
             const double bpm = static_cast<double>(cmd.floatValue);
             loopEngine->setBPM(bpm);
             metronome->setBPM(bpm);
-            // Wenn Metronom aktiv: Loop-Länge sofort aus neuem BPM berechnen
-            if (metronome->getEnabled())
-                loopEngine->calculateLoopLengthFromBPM();
+            // Loop length is determined by the first recording (bar-rounded in metronome mode),
+            // so changing BPM does NOT recalculate loop length here.
             break;
         }
 
@@ -384,9 +383,6 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
         {
             if (isPlayingFlag.load(std::memory_order_relaxed)) { DBG("SetBeatsPerLoop ignored: playing"); break; }
             loopEngine->setBeatsPerLoop(cmd.intValue1);
-            // Nur neu berechnen wenn Metronom aktiv (sonst freier Modus)
-            if (metronome->getEnabled())
-                loopEngine->calculateLoopLengthFromBPM();
             break;
         }
 
@@ -447,10 +443,6 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
 
             loopEngine->setLoopLength(0);
             loopEngine->resetPlayhead();
-
-            if (metronome->getEnabled())
-                loopEngine->calculateLoopLengthFromBPM();
-
             isPlayingFlag.store(false, std::memory_order_release);
             DBG("Song reset: all channels cleared");
             break;
@@ -528,7 +520,7 @@ void AudioEngine::processChannelCommand(const Command& cmd)
         case CommandType::StopRecord:
         {
             const juce::int64 loopLen = loopEngine->getLoopLength();
-            // Free mode: first finished recording sets the global loop length
+            // Free mode: first recording sets the loop length exactly
             if (!metronome->getEnabled() && loopLen == 0)
             {
                 const juce::int64 recorded = loopEngine->getCurrentPlayhead();
@@ -538,6 +530,34 @@ void AudioEngine::processChannelCommand(const Command& cmd)
                     DBG("Loop length from first recording: " +
                         juce::String(recorded) + " samples (" +
                         juce::String(static_cast<double>(recorded) / currentSampleRate, 2) + "s)");
+                }
+                loopEngine->resetPlayhead();
+                channel->stopRecording();
+            }
+            // Metronome mode: first recording — round to nearest bar.
+            // Samples beyond the recorded region are already silence (loop buffer is zeroed).
+            else if (metronome->getEnabled() && loopLen == 0)
+            {
+                const juce::int64 recorded = loopEngine->getCurrentPlayhead();
+                if (recorded > 0)
+                {
+                    const double bpm        = loopEngine->getBPM();
+                    const double spb        = (60.0 / juce::jmax(1.0, bpm)) * currentSampleRate;
+                    const int    bpb        = metronome->getBeatsPerBar();
+                    const double barSamples = bpb * spb;
+
+                    const juce::int64 numBars = juce::jmax(
+                        juce::int64(1),
+                        static_cast<juce::int64>(
+                            std::round(static_cast<double>(recorded) / barSamples)));
+                    const juce::int64 roundedLen =
+                        static_cast<juce::int64>(numBars * barSamples + 0.5);
+
+                    loopEngine->setLoopLength(roundedLen);
+                    DBG("Metronome bar-round: " + juce::String(recorded) + " samples → " +
+                        juce::String(numBars) + " bar(s) = " + juce::String(roundedLen) +
+                        " samples (" +
+                        juce::String(static_cast<double>(roundedLen) / currentSampleRate, 2) + "s)");
                 }
                 loopEngine->resetPlayhead();
                 channel->stopRecording();
@@ -654,9 +674,10 @@ void AudioEngine::processChannelCommand(const Command& cmd)
         case CommandType::ClearChannel:
         {
             channel->clearLoop();
-            // In free mode, reset the global loop length when all channels are empty
-            // so the next first recording can establish a fresh loop length.
-            if (!metronome->getEnabled() && !hasAnyRecordings())
+            // Reset loop length when all channels are empty so the next first
+            // recording can establish a fresh length (bar-rounded in metronome mode,
+            // free-form otherwise).
+            if (!hasAnyRecordings())
             {
                 loopEngine->setLoopLength(0);
                 loopEngine->resetPlayhead();
@@ -690,8 +711,8 @@ bool AudioEngine::sendCommand(const Command& cmd)
 
 void AudioEngine::setPlaying(bool shouldPlay)
 {
-    // When starting play with nothing recorded, always start from position 0.
-    if (shouldPlay && !hasAnyRecordings())
+    // When all channels are empty, always start (and stop) from position 0.
+    if (!hasAnyRecordings())
         loopEngine->resetPlayhead();
 
     isPlayingFlag.store(shouldPlay, std::memory_order_release);
@@ -802,7 +823,8 @@ ChannelType AudioEngine::getChannelType(int index) const
 void AudioEngine::loadPluginAsync(int channelIndex,
                                    int slotIndex,
                                    const juce::String& pluginIdentifier,
-                                   const juce::String& stateBase64)
+                                   const juce::String& stateBase64,
+                                   bool bypassed)
 {
     if (channelIndex < 0 || channelIndex >= 6)
     {
@@ -830,7 +852,7 @@ void AudioEngine::loadPluginAsync(int channelIndex,
         description,
         currentSampleRate,
         currentBufferSize,
-        [this, channelIndex, slotIndex, stateBase64, descName = description.name]
+        [this, channelIndex, slotIndex, stateBase64, bypassed, descName = description.name]
         (std::unique_ptr<juce::AudioPluginInstance> plugin, const juce::String& error)
         {
             if (!plugin)
@@ -864,7 +886,7 @@ void AudioEngine::loadPluginAsync(int channelIndex,
                 if (channel->getType() == ChannelType::VSTi)
                 {
                     static_cast<VSTiChannel*>(channel)->setVSTi(std::move(plugin));
-                    DBG("VSTi loaded → ch " + juce::String(channelIndex));
+                    DBG("VSTi loaded -> ch " + juce::String(channelIndex));
                 }
                 else
                 {
@@ -874,6 +896,8 @@ void AudioEngine::loadPluginAsync(int channelIndex,
             else
             {
                 channel->addPlugin(slotIndex, std::move(plugin));
+                if (bypassed)
+                    channel->setPluginBypassed(slotIndex, true);
                 DBG("FX loaded → ch " + juce::String(channelIndex) +
                     " slot " + juce::String(slotIndex));
             }
@@ -918,10 +942,9 @@ void AudioEngine::setMetronomeEnabled(bool enabled)
     metronome->setEnabled(enabled);
     metronome->setBPM(loopEngine->getBPM());
 
-    if (enabled)
-        loopEngine->calculateLoopLengthFromBPM();   // AN  → Loop-Länge aus BPM
-    else
-        loopEngine->setLoopLength(0);               // AUS → freier Modus
+    // Always reset loop length to 0: in metronome mode the loop length is
+    // determined from the first recording (rounded to full bars), not from BPM.
+    loopEngine->setLoopLength(0);
 
     DBG("Metronome " + juce::String(enabled ? "enabled" : "disabled"));
 }
@@ -999,4 +1022,21 @@ float AudioEngine::getAutoStartThresholdDb() const
 void AudioEngine::setCountInBeats(int beats)
 {
     countInBeats.store(juce::jlimit(0, 16, beats), std::memory_order_release);
+}
+
+//==============================================================================
+// Channel Names (Message Thread)
+//==============================================================================
+
+juce::String AudioEngine::getChannelName(int index) const
+{
+    return (index >= 0 && index < 6) ? channelNames[index] : juce::String();
+}
+
+void AudioEngine::setChannelName(int index, const juce::String& name)
+{
+    if (index >= 0 && index < 6)
+        channelNames[index] = name.trim().isEmpty()
+                              ? "CH " + juce::String(index + 1)
+                              : name.trim();
 }

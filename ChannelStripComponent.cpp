@@ -7,11 +7,17 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     : audioEngine(engine), channelIndex(index)
 {
     //--------------------------------------------------------------------------
-    // Channel label
-    channelLabel.setText("CH " + juce::String(index + 1), juce::dontSendNotification);
+    // Channel label — double-click to rename
+    channelLabel.setText(audioEngine.getChannelName(index), juce::dontSendNotification);
     channelLabel.setFont(juce::Font(14.0f, juce::Font::bold));
     channelLabel.setJustificationType(juce::Justification::centred);
-    channelLabel.setInterceptsMouseClicks(false, false);
+    channelLabel.setEditable(false, true, false);   // double-click to edit
+    channelLabel.setInterceptsMouseClicks(true, false);
+    channelLabel.addMouseListener(this, false);     // propagate clicks to strip
+    channelLabel.onTextChange = [this]
+    {
+        audioEngine.setChannelName(channelIndex, channelLabel.getText());
+    };
     addAndMakeVisible(channelLabel);
 
     stateLabel.setText("Idle", juce::dontSendNotification);
@@ -191,6 +197,14 @@ void ChannelStripComponent::mouseDown(const juce::MouseEvent& e)
 void ChannelStripComponent::timerCallback()
 {
     updateMainButton();
+
+    // Sync channel name label (skip when the user is actively editing it)
+    if (!channelLabel.isBeingEdited())
+    {
+        const auto name = audioEngine.getChannelName(channelIndex);
+        if (channelLabel.getText() != name)
+            channelLabel.setText(name, juce::dontSendNotification);
+    }
 
     auto* channel = audioEngine.getChannel(channelIndex);
     if (!channel) return;
@@ -451,38 +465,18 @@ void ChannelStripComponent::showContextMenu(const juce::MouseEvent&)
     menu.addItem(3, "MIDI Learn: Mute");
     menu.addItem(4, "MIDI Learn: Solo");
     menu.addItem(5, "MIDI Learn: CLR");
-    menu.addItem(6, "MIDI Learn: Overdub");
 
     menu.showMenuAsync(juce::PopupMenu::Options(), [this](int id)
     {
+        auto& mlm = audioEngine.getMidiLearnManager();
         switch (id)
         {
-            case 1: showMidiLearnMenu(&mainButton); break;
-            case 2: showMidiLearnMenu(&gainSlider); break;
-            case 3: showMidiLearnMenu(&muteButton); break;
-            case 4: showMidiLearnMenu(&soloButton); break;
-            case 5:
-                audioEngine.getMidiLearnManager().startLearning(channelIndex, MidiControlTarget::Clear);
-                break;
-            case 6:
-                audioEngine.getMidiLearnManager().startLearning(channelIndex, MidiControlTarget::Overdub);
-                break;
+            case 1: mlm.startLearning(channelIndex, MidiControlTarget::MainButton); break;
+            case 2: mlm.startLearning(channelIndex, MidiControlTarget::Gain);       break;
+            case 3: mlm.startLearning(channelIndex, MidiControlTarget::Mute);       break;
+            case 4: mlm.startLearning(channelIndex, MidiControlTarget::Solo);       break;
+            case 5: mlm.startLearning(channelIndex, MidiControlTarget::Clear);      break;
             default: break;
         }
     });
-}
-
-void ChannelStripComponent::showMidiLearnMenu(juce::Component* target)
-{
-    MidiControlTarget midiTarget;
-
-    if      (target == &mainButton) midiTarget = MidiControlTarget::Record;
-    else if (target == &gainSlider) midiTarget = MidiControlTarget::Gain;
-    else if (target == &muteButton) midiTarget = MidiControlTarget::Mute;
-    else if (target == &soloButton) midiTarget = MidiControlTarget::Solo;
-    else return;
-
-    audioEngine.getMidiLearnManager().startLearning(channelIndex, midiTarget);
-    DBG("MIDI Learn started: ch" + juce::String(channelIndex) +
-        " target " + MidiLearnManager::targetName(midiTarget));
 }

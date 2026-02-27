@@ -87,8 +87,9 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     metronomeButton.setToggleState(audioEngine.getMetronome().getEnabled(),
                                    juce::dontSendNotification);
     metronomeButton.setTooltip(
-        "Metronome mode: loop length is fixed by BPM x Beats. "
-        "Disable for free-form looping (first recording sets the loop length).");
+        "Metronome mode: the first recording sets the loop length, rounded to the nearest bar "
+        "(bar = Beats per bar x BPM). "
+        "Disable for free-form looping (first recording sets the length exactly).");
     metronomeButton.onClick = [this] { metronomeChanged(); };
     addAndMakeVisible(metronomeButton);
 

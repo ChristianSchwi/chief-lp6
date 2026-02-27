@@ -89,7 +89,6 @@ private:
 
     void monitorModeChanged();
     void showContextMenu(const juce::MouseEvent& e);
-    void showMidiLearnMenu(juce::Component* target);
 
     bool isActiveChannel()  const { return audioEngine.getActiveChannel() == channelIndex; }
     bool channel_hasLoop()  const;  // helper — avoids repeated null-check

@@ -132,8 +132,8 @@ void ShowComponent::updateSongPositionLabel()
             juce::dontSendNotification);
     }
 
-    prevSongButton.setEnabled(showLoaded && total > 1);
-    nextSongButton.setEnabled(showLoaded && total > 1);
+    prevSongButton.setEnabled(showLoaded && total >= 1);
+    nextSongButton.setEnabled(showLoaded && total >= 1);
 }
 
 //==============================================================================
@@ -195,9 +195,12 @@ void ShowComponent::saveShowClicked()
     fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
     {
         auto dir = chooser.getResult();
+        if (dir.getFullPathName().isEmpty()) return;   // user cancelled
+        dir.createDirectory();                         // create if not yet existing
         if (!dir.isDirectory()) return;
 
         auto showFile = dir.getChildFile("show.json");
+        currentShow.showFile = showFile;  // update so relative paths are computed from new location
         const auto result = showManager.saveShow(currentShow, showFile);
 
         if (!result.wasOk())
@@ -333,6 +336,8 @@ void ShowComponent::saveSongClicked()
     fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
     {
         auto dir = chooser.getResult();
+        if (dir.getFullPathName().isEmpty()) return;   // user cancelled
+        dir.createDirectory();                         // create if not yet existing
         if (!dir.isDirectory()) return;
 
         Song song;

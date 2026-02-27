@@ -40,6 +40,10 @@
             file="PluginHostWrapper.cpp"/>
       <FILE id="F10PlugH" name="PluginHostWrapper.h" compile="0" resource="0"
             file="PluginHostWrapper.h"/>
+      <FILE id="FPrefC" name="PreferencesComponent.cpp" compile="1" resource="0"
+            file="PreferencesComponent.cpp"/>
+      <FILE id="FPrefH" name="PreferencesComponent.h" compile="0" resource="0"
+            file="PreferencesComponent.h"/>
       <FILE id="C2kYFA" name="PluginManagerComponent.cpp" compile="1" resource="0"
             file="PluginManagerComponent.cpp"/>
       <FILE id="xgwRti" name="PluginManagerComponent.h" compile="0" resource="0"

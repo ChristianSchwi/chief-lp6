@@ -50,7 +50,9 @@ struct ChannelConfig
 {
     ChannelType type{ChannelType::Audio};
     RoutingConfig routing;
-    
+
+    juce::String channelName;   ///< User-defined display name (empty = use default "CH N")
+
     float gainDb{0.0f};
     MonitorMode monitorMode{MonitorMode::WhenTrackActive};  // matches Channel default
     bool muted{false};

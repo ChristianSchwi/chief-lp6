@@ -103,11 +103,9 @@ void LoopEngine::setSampleRate(double newSampleRate)
     updateSamplesPerBeat();
 
     // Do NOT automatically recalculate loop length here.
-    // If metronome mode is active, AudioEngine::audioDeviceAboutToStart already
-    // calls setMetronomeEnabled(true) → calculateLoopLengthFromBPM() via the
-    // metronome path. Doing it here would also overwrite free-mode loop lengths
-    // that were captured from a first recording, causing loops to play wrong
-    // after an audio device change.
+    // Loop length is always set by the first recording (bar-rounded in metronome
+    // mode, exact in free mode) or restored from a saved song. Recalculating
+    // here would overwrite that value after a sample-rate change.
 }
 
 //==============================================================================

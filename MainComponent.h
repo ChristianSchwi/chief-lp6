@@ -7,6 +7,7 @@
 #include "ShowComponent.h"
 #include "SongManager.h"
 #include "ShowManager.h"
+#include "PreferencesComponent.h"
 
 /**
  * @file MainComponent.h
@@ -44,7 +45,8 @@ private:
     std::unique_ptr<ShowComponent> showComponent;
 
     juce::Label      infoLabel;
-    juce::TextButton audioSettingsButton {"Audio Settings"};
+    juce::TextButton audioSettingsButton  {"Audio Settings"};
+    juce::TextButton preferencesButton;   // gear icon — opens PreferencesComponent
     juce::Image      logo;
     juce::Rectangle<int> logoArea;
 

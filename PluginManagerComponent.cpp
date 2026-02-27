@@ -1,6 +1,22 @@
 #include "PluginManagerComponent.h"
 #include "VSTiChannel.h"
 
+// SEH-protected editor creation — same rationale as the helpers in Channel.cpp.
+#if JUCE_WINDOWS
+#include <excpt.h>
+static juce::AudioProcessorEditor* pluginCreateEditor (juce::AudioPluginInstance* p) noexcept
+{
+    __try   { return p->createEditor(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+#else
+static juce::AudioProcessorEditor* pluginCreateEditor (juce::AudioPluginInstance* p) noexcept
+{
+    try   { return p->createEditor(); }
+    catch (...) { return nullptr; }
+}
+#endif
+
 //==============================================================================
 // PluginSlotRow
 //==============================================================================
@@ -172,7 +188,7 @@ void PluginSlotRow::openEditor()
         return;
     }
 
-    auto* editor = plugin->createEditor();
+    auto* editor = pluginCreateEditor (plugin);
     if (!editor)
     {
         juce::AlertWindow::showMessageBoxAsync(

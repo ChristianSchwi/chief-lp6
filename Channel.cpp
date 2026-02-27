@@ -1,5 +1,43 @@
 #include "Channel.h"
 
+// SEH-protected plugin helpers — see VSTiChannel.cpp for rationale.
+#if JUCE_WINDOWS
+#include <excpt.h>
+
+static bool pluginCallPrepareToPlay (juce::AudioPluginInstance* p,
+                                     double sr, int bs) noexcept
+{
+    __try   { p->prepareToPlay (sr, bs); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool pluginCallProcessBlock (juce::AudioPluginInstance* p,
+                                    juce::AudioBuffer<float>& buf,
+                                    juce::MidiBuffer&         midi) noexcept
+{
+    __try   { p->processBlock (buf, midi); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+#else
+
+static bool pluginCallPrepareToPlay (juce::AudioPluginInstance* p,
+                                     double sr, int bs) noexcept
+{
+    try   { p->prepareToPlay (sr, bs); return true; }
+    catch (...) { return false; }
+}
+
+static bool pluginCallProcessBlock (juce::AudioPluginInstance* p,
+                                    juce::AudioBuffer<float>& buf,
+                                    juce::MidiBuffer&         midi) noexcept
+{
+    try   { p->processBlock (buf, midi); return true; }
+    catch (...) { return false; }
+}
+
+#endif
+
 //==============================================================================
 Channel::Channel(int index, ChannelType type)
     : channelIndex(index), channelType(type) {}
@@ -198,7 +236,10 @@ void Channel::addPlugin(int slotIndex, std::unique_ptr<juce::AudioPluginInstance
     auto& slot = fxChain[slotIndex];
 
     slot.bypassed.store(true, std::memory_order_release);
-    juce::Thread::sleep(10);
+    const int blockMs = (sampleRate > 0.0 && maxBlockSize > 0)
+                      ? static_cast<int>(maxBlockSize * 1000.0 / sampleRate) + 5
+                      : 20;
+    juce::Thread::sleep(blockMs);
 
     if (slot.plugin) { slot.plugin->releaseResources(); slot.plugin.reset(); }
 
@@ -207,12 +248,10 @@ void Channel::addPlugin(int slotIndex, std::unique_ptr<juce::AudioPluginInstance
 
     if (slot.plugin)
     {
-        try
-        {
-            slot.plugin->prepareToPlay(sampleRate, maxBlockSize);
+        if (pluginCallPrepareToPlay (slot.plugin.get(), sampleRate, maxBlockSize))
             slot.bypassed.store(false, std::memory_order_release);
-        }
-        catch (...) { slot.crashed.store(true, std::memory_order_release); }
+        else
+            slot.crashed.store(true, std::memory_order_release);
     }
 }
 
@@ -222,7 +261,10 @@ void Channel::removePlugin(int slotIndex)
     auto& slot = fxChain[slotIndex];
     if (!slot.plugin) return;
     slot.bypassed.store(true, std::memory_order_release);
-    juce::Thread::sleep(10);
+    const int blockMs = (sampleRate > 0.0 && maxBlockSize > 0)
+                      ? static_cast<int>(maxBlockSize * 1000.0 / sampleRate) + 5
+                      : 20;
+    juce::Thread::sleep(blockMs);
     slot.plugin->releaseResources();
     slot.plugin.reset();
     slot.crashed.store(false, std::memory_order_release);
@@ -306,20 +348,16 @@ void Channel::processFXChain(juce::AudioBuffer<float>& buffer,
         if (slot.bypassed.load(std::memory_order_acquire)) continue;
         if (slot.crashed .load(std::memory_order_acquire)) continue;
         if (!slot.plugin)                                   continue;
-        try
+        // Pass a non-owning view of exactly numSamples (SEH-protected on Windows).
         {
-            // Pass a non-owning view of exactly numSamples so the plugin advances its
-            // internal state (envelopes, LFOs, delay lines) by exactly one real block,
-            // not by the over-allocated buffer size (which would be 2× too fast).
             juce::AudioBuffer<float> view (buffer.getArrayOfWritePointers(),
                                            buffer.getNumChannels(),
                                            numSamples);
-            slot.plugin->processBlock(view, midiBuffer);
-        }
-        catch (...)
-        {
-            slot.crashed.store(true, std::memory_order_release);
-            DBG("FX plugin crashed in channel " + juce::String(channelIndex));
+            if (!pluginCallProcessBlock (slot.plugin.get(), view, midiBuffer))
+            {
+                slot.crashed.store (true, std::memory_order_release);
+                DBG ("FX plugin crashed in channel " + juce::String (channelIndex));
+            }
         }
     }
 }

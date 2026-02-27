@@ -34,22 +34,22 @@ juce::Result ShowManager::loadShow(const juce::File& showFile, Show& show)
 {
     if (!showFile.existsAsFile())
         return juce::Result::fail("Show file not found: " + showFile.getFullPathName());
-    
+
+    // Set showFile before jsonToShow — it uses it to resolve relative song paths
+    show.showFile = showFile;
+
     // Read JSON
     juce::String jsonString = showFile.loadFileAsString();
     auto json = juce::JSON::parse(jsonString);
-    
+
     if (!json.isObject())
         return juce::Result::fail("Invalid JSON in show file");
-    
+
     // Deserialize
     auto result = jsonToShow(json, show);
     if (result.failed())
         return result;
-    
-    // Set show file
-    show.showFile = showFile;
-    
+
     DBG("Show loaded: " + showFile.getFullPathName());
     DBG("  Songs: " + juce::String(show.getNumSongs()));
     

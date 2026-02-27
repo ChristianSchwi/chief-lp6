@@ -46,13 +46,21 @@ juce::Result SongManager::saveSong(Song& song, AudioEngine& audioEngine)
             {
                 DBG("WARNING: loop save failed for ch " + juce::String(i) +
                     ": " + saveResult.getErrorMessage());
-                // non-fatal — continue
+                // non-fatal — continue; clear the flag so the JSON doesn't claim a file exists
+                song.channels[i].hasLoopData  = false;
+                song.channels[i].loopFileName = {};
             }
             else
             {
                 song.channels[i].hasLoopData  = true;
                 song.channels[i].loopFileName = loopFile.getFileName();
             }
+        }
+        else
+        {
+            // No loop or loop length unknown — ensure JSON doesn't reference a missing file
+            song.channels[i].hasLoopData  = false;
+            song.channels[i].loopFileName = {};
         }
     }
 
@@ -105,10 +113,10 @@ juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audio
     audioEngine.getLoopEngine().setBeatsPerLoop(song.beatsPerLoop);
     audioEngine.setLatchMode(song.latchModeEnabled);
 
-    if (song.loopLengthSamples > 0)
-        audioEngine.getLoopEngine().setLoopLength(song.loopLengthSamples);
-    else
-        audioEngine.getLoopEngine().calculateLoopLengthFromBPM();
+    // Restore the saved loop length exactly.  In metronome mode the loop length
+    // is now established by the first recording (bar-rounded), not from BPM,
+    // so we never call calculateLoopLengthFromBPM() here.
+    audioEngine.getLoopEngine().setLoopLength(song.loopLengthSamples);
 
     // Metronome
     audioEngine.getMetronome().setEnabled(song.metronomeEnabled);
@@ -126,6 +134,7 @@ juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audio
         auto* channel = audioEngine.getChannel(i);
         if (!channel) continue;
 
+        audioEngine.setChannelName(i, cfg.channelName);
         channel->setGainDb    (cfg.gainDb);
         channel->setMonitorMode(cfg.monitorMode);
         channel->setMuted      (cfg.muted);
@@ -185,7 +194,7 @@ juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audio
         {
             const auto& pd = cfg.fxPlugins[slot];
             if (!pd.identifier.isEmpty())
-                audioEngine.loadPluginAsync(i, slot, pd.identifier, pd.stateBase64);
+                audioEngine.loadPluginAsync(i, slot, pd.identifier, pd.stateBase64, pd.bypassed);
         }
     }
 
@@ -289,6 +298,7 @@ ChannelConfig SongManager::readChannelState(Channel* channel,
     if (!channel) return cfg;
 
     cfg.type        = channel->getType();
+    cfg.channelName = audioEngine.getChannelName(channelIndex);
     cfg.gainDb      = channel->getGainDb();
     cfg.monitorMode = channel->getMonitorMode();
     cfg.muted       = channel->isMuted();
@@ -403,6 +413,7 @@ juce::var SongManager::channelToJSON(const ChannelConfig& ch)
     auto* obj = new juce::DynamicObject();
 
     obj->setProperty("type",         ch.type == ChannelType::Audio ? "Audio" : "VSTi");
+    obj->setProperty("channel_name", ch.channelName);
     obj->setProperty("gain_db",      ch.gainDb);
     obj->setProperty("monitor_mode", static_cast<int>(ch.monitorMode));
     obj->setProperty("muted",        ch.muted);
@@ -431,6 +442,7 @@ juce::Result SongManager::jsonToChannel(const juce::var& json, ChannelConfig& ch
 
     ch.type        = (obj->getProperty("type").toString() == "VSTi")
                      ? ChannelType::VSTi : ChannelType::Audio;
+    ch.channelName = obj->getProperty("channel_name").toString();
     ch.gainDb      = obj->getProperty("gain_db");
     ch.monitorMode = static_cast<MonitorMode>((int)obj->getProperty("monitor_mode"));
     ch.muted       = obj->getProperty("muted");
@@ -446,8 +458,13 @@ juce::Result SongManager::jsonToChannel(const juce::var& json, ChannelConfig& ch
     {
         auto* fxArr = obj->getProperty("fx_plugins").getArray();
         if (fxArr)
-            for (int i = 0; i < juce::jmin(3, fxArr->size()); ++i)
-                jsonToPlugin(fxArr->getReference(i), ch.fxPlugins[i]);
+            for (const auto& pluginVar : *fxArr)
+            {
+                PluginData pd;
+                jsonToPlugin(pluginVar, pd);
+                if (pd.slotIndex >= 0 && pd.slotIndex < 3)
+                    ch.fxPlugins[pd.slotIndex] = pd;
+            }
     }
 
     return juce::Result::ok();

@@ -87,6 +87,10 @@ public:
     void        setChannelType(int index, ChannelType type);
     ChannelType getChannelType(int index) const;
 
+    /** Get/set the display name for a channel (message thread only). */
+    juce::String getChannelName(int index) const;
+    void         setChannelName(int index, const juce::String& name);
+
     //==========================================================================
     // Plugin Management
     //==========================================================================
@@ -101,7 +105,8 @@ public:
     void loadPluginAsync(int channelIndex,
                          int slotIndex,
                          const juce::String& pluginIdentifier,
-                         const juce::String& stateBase64 = {});
+                         const juce::String& stateBase64 = {},
+                         bool bypassed = false);
 
     /** Called on the message thread when a plugin fails to load. Set before loading. */
     std::function<void(int channelIndex, int slotIndex, const juce::String& error)>
@@ -279,6 +284,9 @@ private:
     // Diagnostics
     std::atomic<juce::int64>  totalSamplesProcessed {0};
     std::atomic<juce::int32>  xrunCount             {0};
+
+    // Channel display names (message thread only)
+    std::array<juce::String, 6> channelNames;
 
     //==========================================================================
     // Command processing (audio thread)

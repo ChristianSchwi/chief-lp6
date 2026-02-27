@@ -21,18 +21,34 @@ class AudioEngine;
 
 //==============================================================================
 /**
+ * @brief Controls how channel-specific MIDI mappings are dispatched.
+ *
+ * PerChannel    — each channel has independent MIDI mappings
+ *                 (e.g. CC1→Ch1 main, CC2→Ch2 main).
+ * ActiveChannel — every channel-specific mapping is redirected to whichever
+ *                 channel is currently active; one set of controls for all.
+ */
+enum class MidiLearnMode
+{
+    PerChannel,     ///< Each channel reacts to its own dedicated MIDI messages
+    ActiveChannel   ///< All channel controls always apply to the active channel
+};
+
+//==============================================================================
+/**
  * @brief Welches Control eines Channels ist gemeint
  */
 enum class MidiControlTarget
 {
-    Record,
-    Play,
-    Overdub,
+    Record,              // legacy — kept for XML back-compat; not shown in UI
+    Play,                // legacy — kept for XML back-compat; not shown in UI
+    Overdub,             // legacy — kept for XML back-compat; not shown in UI
     Clear,
     Gain,                // CC → -60..+12 dB
     Mute,
     Solo,
     MonitorMode,         // CC → 4 Modi
+    MainButton,          // context-aware: same behaviour as clicking the main button
     GlobalPlayStop,      // toggle transport play/stop
     NextChannel,         // select next channel (global)
     PrevChannel,         // select previous channel (global)
@@ -120,6 +136,16 @@ public:
     /** Callback wenn eine neue Zuweisung abgeschlossen wurde */
     std::function<void(const MidiMapping&)> onAssignmentMade;
 
+    //==========================================================================
+    // MIDI Learn Mode
+    //==========================================================================
+
+    /** Set the dispatch mode (PerChannel or ActiveChannel). Thread-safe. */
+    void setMidiLearnMode(MidiLearnMode mode);
+
+    /** Get the current dispatch mode. Thread-safe. */
+    MidiLearnMode getMidiLearnMode() const;
+
     /** Callbacks for global song navigation (set by ShowComponent) */
     std::function<void()> onNextSong;
     std::function<void()> onPrevSong;
@@ -138,8 +164,22 @@ public:
     // Persistenz
     //==========================================================================
 
+    /**
+     * Save the current mapping set to an explicit file path.
+     * Normally called internally; exposed for potential external use (e.g. export).
+     */
     bool saveMappings(const juce::File& file) const;
+
+    /**
+     * Load a mapping set from an explicit file path and replace the current set.
+     * The active mode is NOT changed by this call.
+     */
     bool loadMappings(const juce::File& file);
+
+    /**
+     * Returns the mappings file for the currently active mode.
+     * Legacy name kept for call-site compatibility.
+     */
     juce::File getDefaultMappingsFile() const;
 
     /** Gibt eine lesbare Beschreibung eines Controls zurück */
@@ -153,6 +193,9 @@ private:
     std::atomic<bool> learningActive{false};
     MidiMapping currentLearningTarget;
     juce::CriticalSection learningLock;
+
+    // MIDI learn mode — 0 = PerChannel, 1 = ActiveChannel
+    std::atomic<int> midiLearnModeFlag {0};
 
     // Mappings  key = channelIndex_targetIndex
     std::map<juce::String, MidiMapping> mappings;
@@ -172,7 +215,15 @@ private:
     void processMidiMessage(const juce::MidiMessage& msg);
     void applyMapping(const MidiMapping& mapping, const juce::MidiMessage& msg);
 
-    void saveImmediately();
+    // Persistence helpers
+    void saveImmediately();                                    // save mode file + global file
+    juce::File getMappingsFileForMode(MidiLearnMode m) const; // per-mode channel file path
+    juce::File getGlobalMappingsFile()                const;  // midi_global.xml (shared)
+    juce::File getPreferencesFile()                   const;  // preferences.xml path
+    void savePreferences();                                    // write active mode to prefs
+    void loadPreferences();                                    // read mode from prefs + migrate
+    void saveGlobalMappings();                                 // write channelIndex==-1 entries
+    void loadGlobalMappings();                                 // read channelIndex==-1 entries
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MidiLearnManager)
 };

@@ -1,6 +1,53 @@
 #include "VSTiChannel.h"
 
 //==============================================================================
+// Platform-specific crash protection for plugin calls.
+//
+// On Windows, access violations (AV) inside plugin DLLs are SEH exceptions and
+// are NOT caught by C++ catch(...) when compiled with /EHsc (JUCE's default).
+// We wrap every dangerous plugin call in a standalone function that contains
+// only pointers/references as locals — no C++ objects with destructors — which
+// satisfies MSVC's requirement to use __try/__except in the same function.
+// On non-Windows platforms we fall back to ordinary C++ exception handling.
+
+#if JUCE_WINDOWS
+#include <excpt.h>
+
+static bool pluginCallPrepareToPlay (juce::AudioPluginInstance* p,
+                                     double sr, int bs) noexcept
+{
+    __try   { p->prepareToPlay (sr, bs); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool pluginCallProcessBlock (juce::AudioPluginInstance* p,
+                                    juce::AudioBuffer<float>& buf,
+                                    juce::MidiBuffer&         midi) noexcept
+{
+    __try   { p->processBlock (buf, midi); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+#else
+
+static bool pluginCallPrepareToPlay (juce::AudioPluginInstance* p,
+                                     double sr, int bs) noexcept
+{
+    try   { p->prepareToPlay (sr, bs); return true; }
+    catch (...) { return false; }
+}
+
+static bool pluginCallProcessBlock (juce::AudioPluginInstance* p,
+                                    juce::AudioBuffer<float>& buf,
+                                    juce::MidiBuffer&         midi) noexcept
+{
+    try   { p->processBlock (buf, midi); return true; }
+    catch (...) { return false; }
+}
+
+#endif
+
+//==============================================================================
 VSTiChannel::VSTiChannel(int index)
     : Channel(index, ChannelType::VSTi)
 {
@@ -15,46 +62,61 @@ VSTiChannel::VSTiChannel(int index)
 
 void VSTiChannel::setVSTi(std::unique_ptr<juce::AudioPluginInstance> instrument)
 {
-    // Block audio thread from accessing vsti during the swap
+    // Block audio thread from accessing vsti during the swap.
     vstiCrashed.store(true, std::memory_order_release);
-    juce::Thread::sleep(10);
 
-    // Release old VSTi if present
+    // Wait long enough for the audio thread to finish any in-flight processBlock().
+    // Use the actual block duration rather than a hardcoded 10 ms, which can be
+    // shorter than one block at small buffer sizes (e.g. 512 @ 44100 Hz = ~11.6 ms).
+    const int blockMs = (sampleRate > 0.0 && maxBlockSize > 0)
+                      ? static_cast<int>(maxBlockSize * 1000.0 / sampleRate) + 5
+                      : 20;
+    juce::Thread::sleep(blockMs);
+
+    // Release old VSTi if present.
     if (vsti)
-    {
         vsti->releaseResources();
-    }
 
-    // Install new VSTi
+    // Install new VSTi.
     vsti = std::move(instrument);
-    vstiCrashed.store(false, std::memory_order_release);
-    
-    // Prepare new VSTi
+
+    // Prepare the new plugin BEFORE clearing vstiCrashed.  The audio thread stays
+    // blocked (vstiCrashed == true) until prepareToPlay() completes, so it can
+    // never call processBlock() on an uninitialised plugin.
     if (vsti)
     {
-        try
+        if (pluginCallPrepareToPlay (vsti.get(), sampleRate, maxBlockSize))
         {
-            vsti->prepareToPlay(sampleRate, maxBlockSize);
-            DBG("VSTi loaded on channel " + juce::String(channelIndex) + 
-                ": " + vsti->getName());
+            // Resize output buffer to the plugin's actual channel count while
+            // the audio thread is still blocked (vstiCrashed == true).
+            const int numOut = juce::jmax(2, vsti->getTotalNumOutputChannels());
+            vstiOutputBuffer.setSize(numOut, maxBlockSize * 2, false, true, false);
+
+            DBG("VSTi loaded on channel " + juce::String(channelIndex) +
+                ": " + vsti->getName() + " (" + juce::String(numOut) + " out ch)");
         }
-        catch (...)
+        else
         {
-            DBG("VSTi crashed during prepareToPlay() on channel " + 
+            DBG("VSTi crashed during prepareToPlay() on channel " +
                 juce::String(channelIndex));
-            vstiCrashed.store(true, std::memory_order_release);
+            vsti.reset();   // don't expose a broken plugin to the audio thread
         }
     }
+
+    vstiCrashed.store(false, std::memory_order_release);
 }
 
 void VSTiChannel::removeVSTi()
 {
     if (!vsti) return;
-    // Block audio thread from accessing vsti during removal
     vstiCrashed.store(true, std::memory_order_release);
-    juce::Thread::sleep(10);
+    const int blockMs = (sampleRate > 0.0 && maxBlockSize > 0)
+                      ? static_cast<int>(maxBlockSize * 1000.0 / sampleRate) + 5
+                      : 20;
+    juce::Thread::sleep(blockMs);
     vsti->releaseResources();
     vsti.reset();
+    vstiCrashed.store(false, std::memory_order_release);
     DBG("VSTi removed from channel " + juce::String(channelIndex));
 }
 
@@ -75,24 +137,26 @@ void VSTiChannel::prepareToPlay(double newSampleRate,
     // Call base class preparation
     Channel::prepareToPlay(newSampleRate, newMaxBlockSize, maxLoopLengthSamples);
     
-    // Allocate VSTi-specific buffers
-    vstiOutputBuffer.setSize(2, maxBlockSize * 2, false, true, true);
-    vstiOutputBuffer.clear();
-    
-    // Prepare VSTi if present
+    // Prepare VSTi if present (must happen before sizing vstiOutputBuffer so we
+    // can query the plugin's actual output channel count afterwards).
     if (vsti && !vstiCrashed.load(std::memory_order_relaxed))
     {
-        try
+        if (!pluginCallPrepareToPlay(vsti.get(), newSampleRate, newMaxBlockSize))
         {
-            vsti->prepareToPlay(newSampleRate, newMaxBlockSize);
-        }
-        catch (...)
-        {
-            DBG("VSTi crashed during prepareToPlay() on channel " + 
+            DBG("VSTi crashed during prepareToPlay() on channel " +
                 juce::String(channelIndex));
             vstiCrashed.store(true, std::memory_order_release);
         }
     }
+
+    // Allocate VSTi-specific buffers — sized to the plugin's actual output
+    // channel count so JUCE's HostBufferMapper never calls getWritePointer()
+    // out of range.  Fall back to 2 when no plugin is loaded.
+    const int numVstiOut = (vsti && !vstiCrashed.load(std::memory_order_relaxed))
+                         ? juce::jmax(2, vsti->getTotalNumOutputChannels())
+                         : 2;
+    vstiOutputBuffer.setSize(numVstiOut, maxBlockSize * 2, false, true, true);
+    vstiOutputBuffer.clear();
 }
 
 void VSTiChannel::releaseResources()
@@ -266,24 +330,19 @@ void VSTiChannel::processVSTi(juce::AudioBuffer<float>& outputBuffer,
     if (vstiCrashed.load(std::memory_order_relaxed))
         return;
     
-    // Process VSTi with crash protection
-    try
+    // Process VSTi with crash protection (SEH on Windows, C++ catch elsewhere).
+    // Pass a non-owning view of exactly numSamples so the plugin advances its
+    // internal state by exactly one real block, not by the over-allocated size.
     {
-        // Pass a non-owning view of exactly numSamples so the plugin advances its
-        // internal state (envelopes, LFOs, delay lines) by exactly one real block,
-        // not by the over-allocated buffer size (which would be 2× too fast).
         juce::AudioBuffer<float> view (outputBuffer.getArrayOfWritePointers(),
                                        outputBuffer.getNumChannels(),
                                        numSamples);
-        vsti->processBlock(view, midiBuffer);
-    }
-    catch (...)
-    {
-        // VSTi crashed - mark as crashed and clear output
-        vstiCrashed.store(true, std::memory_order_release);
-        outputBuffer.clear(0, numSamples);
-
-        DBG("VSTi crashed in channel " + juce::String(channelIndex) + "!");
+        if (!pluginCallProcessBlock (vsti.get(), view, midiBuffer))
+        {
+            vstiCrashed.store (true, std::memory_order_release);
+            outputBuffer.clear (0, numSamples);
+            DBG ("VSTi crashed in channel " + juce::String (channelIndex) + "!");
+        }
     }
 }
 

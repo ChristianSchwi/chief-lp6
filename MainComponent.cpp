@@ -36,6 +36,25 @@ MainComponent::MainComponent()
     infoLabel.setFont(juce::Font(12.0f));
     addAndMakeVisible(infoLabel);
 
+    // --- Preferences button (⚙) ---
+    preferencesButton.setButtonText(juce::CharPointer_UTF8("\xe2\x9a\x99\xef\xb8\x8f Prefs"));
+    preferencesButton.setTooltip("Open application preferences");
+    preferencesButton.onClick = [this]
+    {
+        auto* prefs = new PreferencesComponent(
+            audioEngine.getMidiLearnManager());
+
+        juce::DialogWindow::LaunchOptions opts;
+        opts.content.setOwned(prefs);
+        opts.dialogTitle                  = "Preferences";
+        opts.dialogBackgroundColour       = juce::Colour(0xFF1E1E1E);
+        opts.escapeKeyTriggersCloseButton = true;
+        opts.useNativeTitleBar            = false;
+        opts.resizable                    = false;
+        opts.launchAsync();
+    };
+    addAndMakeVisible(preferencesButton);
+
     // --- Audio settings button ---
     audioSettingsButton.onClick = [this]
     {
@@ -106,10 +125,11 @@ void MainComponent::resized()
     // Show/song bar at the bottom — fixed height
     showComponent->setBounds(area.removeFromBottom(36));
 
-    // Info row: logo (right corner) + audio settings button + info label
+    // Info row: logo (right corner) + audio settings + preferences + info label
     auto infoRow = area.removeFromBottom(26);
     logoArea = infoRow.removeFromRight(90).reduced(2, 2);
     audioSettingsButton.setBounds(infoRow.removeFromRight(120).reduced(2, 2));
+    preferencesButton  .setBounds(infoRow.removeFromRight(90) .reduced(2, 2));
     infoLabel.setBounds(infoRow.reduced(4, 0));
 
     // Remaining area: transport (left panel) + 6 channel strips
@@ -275,13 +295,8 @@ void MainComponent::initializeAudio()
     // --- Global loop settings ---
     audioEngine.getLoopEngine().setBPM(120.0);
     audioEngine.getLoopEngine().setBeatsPerLoop(4);
-
-    // BUG B FIX: calculateLoopLengthFromBPM() NUR aufrufen wenn Metronom aktiv.
-    // Im Startup-Zustand ist das Metronom AUS → freier Modus → Loop-Länge bleibt 0.
-    // Sonst würde der Loop im Metronom-Modus starten obwohl der Schalter auf AUS steht.
-    if (audioEngine.getMetronome().getEnabled())
-        audioEngine.getLoopEngine().calculateLoopLengthFromBPM();
-    // else: Loop-Länge = 0 → erste Aufnahme setzt sie (freier Modus)
+    // Loop length starts at 0 in all modes; the first recording sets it
+    // (bar-rounded in metronome mode, exact in free mode).
 
     // Transport starts stopped; user must press Play or hit Record on a channel.
 
