@@ -67,15 +67,18 @@ enum class MidiControlTarget
  */
 struct MidiMapping
 {
-    int channelIndex  {-1};  ///< 0-5, -1 = global
+    int channelIndex     {-1};  ///< 0-5, -1 = global
     MidiControlTarget target {MidiControlTarget::Gain};
-    int midiChannel   {0};   ///< 0 = alle, 1-16 = spezifisch
-    int ccNumber      {-1};  ///< -1 = ungenutzt (Note-based)
-    int noteNumber    {-1};  ///< -1 = ungenutzt (CC-based)
+    int midiChannel      {0};   ///< 0 = alle, 1-16 = spezifisch
+    int ccNumber         {-1};  ///< -1 = ungenutzt (Note-based or PC-based)
+    int noteNumber       {-1};  ///< -1 = ungenutzt (CC-based or PC-based)
+    int programNumber    {-1};  ///< -1 = ungenutzt, 0-127 = Program Change number
+    int rawStatusNibble  {-1};  ///< upper nibble of status byte for generic messages (e.g. 0xE=pitch bend)
+    int rawData1         {-1};  ///< first data byte to match (-1 = any); used for poly aftertouch
     float minValue    {0.0f};
     float maxValue    {1.0f};
 
-    bool isValid() const { return ccNumber >= 0 || noteNumber >= 0; }
+    bool isValid() const { return ccNumber >= 0 || noteNumber >= 0 || programNumber >= 0 || rawStatusNibble >= 0; }
     juce::String getKey() const
     {
         return juce::String(channelIndex) + "_" +
@@ -117,6 +120,19 @@ public:
     /** True wenn gerade auf eine MIDI-Message gewartet wird */
     bool isLearning() const { return learningActive.load(); }
 
+    //==========================================================================
+    // Unlearn-Modus
+    //==========================================================================
+
+    /** Aktiviert den Unlearn-Modus: nächste Control-Auswahl entfernt deren Mapping */
+    void startUnlearning();
+
+    /** Beendet den Unlearn-Modus ohne eine Zuweisung zu entfernen */
+    void stopUnlearning();
+
+    /** True wenn der Unlearn-Modus aktiv ist */
+    bool isUnlearning() const { return unlearningActive.load(std::memory_order_relaxed); }
+
     /** Info was gerade gelernt wird (für GUI-Feedback) */
     MidiMapping getLearningTarget() const { return currentLearningTarget; }
 
@@ -127,11 +143,18 @@ public:
     /** Entfernt die Zuweisung für ein Control */
     void removeMapping(int channelIndex, MidiControlTarget target);
 
+    /** Removes every MIDI mapping (channel-specific + global). */
+    void removeAllMappings();
+
     /** Gibt das Mapping für ein Control zurück (isValid() = false wenn keins) */
     MidiMapping getMapping(int channelIndex, MidiControlTarget target) const;
 
     /** Alle aktuellen Mappings */
     std::vector<MidiMapping> getAllMappings() const;
+
+    /** Last MIDI message processed (message thread only). Empty if none received yet. */
+    juce::MidiMessage getLastMidiMessage() const { return lastProcessedMidi; }
+    bool              hasReceivedMidi()    const { return lastMidiReceived; }
 
     /** Callback wenn eine neue Zuweisung abgeschlossen wurde */
     std::function<void(const MidiMapping&)> onAssignmentMade;
@@ -190,7 +213,8 @@ private:
     AudioEngine& audioEngine;
 
     // Learn-State
-    std::atomic<bool> learningActive{false};
+    std::atomic<bool> learningActive  {false};
+    std::atomic<bool> unlearningActive{false};
     MidiMapping currentLearningTarget;
     juce::CriticalSection learningLock;
 
@@ -200,6 +224,10 @@ private:
     // Mappings  key = channelIndex_targetIndex
     std::map<juce::String, MidiMapping> mappings;
     mutable juce::CriticalSection mappingsLock;
+
+    // Last processed MIDI message (message thread only — no lock needed)
+    juce::MidiMessage lastProcessedMidi;
+    bool              lastMidiReceived {false};
 
     // Lock-free Queue für MIDI-Messages aus dem Audio-Thread
     juce::AbstractFifo fifo{256};

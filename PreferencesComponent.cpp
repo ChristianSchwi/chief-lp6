@@ -6,8 +6,12 @@ static const juce::Colour accentColour  { 0xFF4A8FCC };
 static const juce::Colour mutedColour   { 0xFF3A3A3A };
 
 //==============================================================================
-PreferencesComponent::PreferencesComponent(MidiLearnManager& mlm)
+PreferencesComponent::PreferencesComponent(MidiLearnManager& mlm,
+                                           std::function<bool()>    getAutoRecall,
+                                           std::function<void(bool)> setAutoRecall)
     : midiLearnManager(mlm)
+    , autoRecallGetter(std::move(getAutoRecall))
+    , autoRecallSetter(std::move(setAutoRecall))
 {
     //--------------------------------------------------------------------------
     // Section header: MIDI Learn Mode
@@ -45,7 +49,23 @@ PreferencesComponent::PreferencesComponent(MidiLearnManager& mlm)
 
     updateMidiLearnModeButtons();
 
-    setSize(520, 200);
+    //--------------------------------------------------------------------------
+    // Section header: Session
+    sectionSessionLabel.setText("Session", juce::dontSendNotification);
+    sectionSessionLabel.setFont(juce::Font(14.0f, juce::Font::bold));
+    sectionSessionLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible(sectionSessionLabel);
+
+    autoRecallButton.setToggleState(autoRecallGetter ? autoRecallGetter() : false,
+                                    juce::dontSendNotification);
+    autoRecallButton.onClick = [this]
+    {
+        if (autoRecallSetter)
+            autoRecallSetter(autoRecallButton.getToggleState());
+    };
+    addAndMakeVisible(autoRecallButton);
+
+    setSize(520, 290);
 }
 
 //==============================================================================
@@ -53,34 +73,45 @@ void PreferencesComponent::paint(juce::Graphics& g)
 {
     g.fillAll(bgColour);
 
-    // Section background panel
-    auto sectionBounds = getLocalBounds().reduced(12).withHeight(140);
+    // MIDI section background panel
+    auto midiSection = getLocalBounds().reduced(12).withHeight(140);
     g.setColour(sectionColour);
-    g.fillRoundedRectangle(sectionBounds.toFloat(), 6.0f);
-
-    // Section divider line below header
+    g.fillRoundedRectangle(midiSection.toFloat(), 6.0f);
     g.setColour(juce::Colours::grey.withAlpha(0.4f));
-    g.drawHorizontalLine(sectionBounds.getY() + 28,
-                         static_cast<float>(sectionBounds.getX() + 6),
-                         static_cast<float>(sectionBounds.getRight() - 6));
+    g.drawHorizontalLine(midiSection.getY() + 28,
+                         static_cast<float>(midiSection.getX() + 6),
+                         static_cast<float>(midiSection.getRight() - 6));
+
+    // Session section background panel
+    auto sessionSection = getLocalBounds().reduced(12).withTop(midiSection.getBottom() + 8)
+                                          .withHeight(66);
+    g.setColour(sectionColour);
+    g.fillRoundedRectangle(sessionSection.toFloat(), 6.0f);
+    g.setColour(juce::Colours::grey.withAlpha(0.4f));
+    g.drawHorizontalLine(sessionSection.getY() + 28,
+                         static_cast<float>(sessionSection.getX() + 6),
+                         static_cast<float>(sessionSection.getRight() - 6));
 }
 
 void PreferencesComponent::resized()
 {
     auto area = getLocalBounds().reduced(20);
 
-    // Section header
+    // --- MIDI Learn section ---
     sectionMidiLabel.setBounds(area.removeFromTop(24));
     area.removeFromTop(8);
-
-    // Description text
     midiLearnDescLabel.setBounds(area.removeFromTop(52));
     area.removeFromTop(10);
-
-    // Mode buttons
     auto buttonRow = area.removeFromTop(30);
     perChannelButton   .setBounds(buttonRow.removeFromLeft(150).reduced(2));
     activeChannelButton.setBounds(buttonRow.removeFromLeft(150).reduced(2));
+
+    area.removeFromTop(18);  // gap between sections
+
+    // --- Session section ---
+    sectionSessionLabel.setBounds(area.removeFromTop(24));
+    area.removeFromTop(8);
+    autoRecallButton.setBounds(area.removeFromTop(28));
 }
 
 //==============================================================================

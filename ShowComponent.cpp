@@ -326,31 +326,40 @@ void ShowComponent::loadSongClicked()
 
 void ShowComponent::saveSongClicked()
 {
+    // Open a save dialog: user types the song name (e.g. "MySong").
+    // A subfolder with that name is created inside the chosen parent directory.
     fileChooser = std::make_unique<juce::FileChooser>(
-        "Save Song",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
+        "Save Song – Enter Song Name",
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+            .getChildFile("MySong"),
+        "");
 
-    const auto flags = juce::FileBrowserComponent::saveMode |
-                       juce::FileBrowserComponent::canSelectDirectories;
+    const auto flags = juce::FileBrowserComponent::saveMode;
 
     fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
     {
-        auto dir = chooser.getResult();
-        if (dir.getFullPathName().isEmpty()) return;   // user cancelled
-        dir.createDirectory();                         // create if not yet existing
+        const auto result = chooser.getResult();
+        if (result.getFullPathName().isEmpty()) return;   // user cancelled
+
+        const juce::String songName = result.getFileNameWithoutExtension();
+        if (songName.isEmpty()) return;
+
+        // Create a subfolder named after the song inside the chosen parent dir
+        auto dir = result.getParentDirectory().getChildFile(songName);
+        dir.createDirectory();
         if (!dir.isDirectory()) return;
 
         Song song;
-        song.songName      = dir.getFileName();
+        song.songName      = songName;
         song.songDirectory = dir;
 
-        const auto result = songManager.saveSong(song, audioEngine);
+        const auto saveResult = songManager.saveSong(song, audioEngine);
 
-        if (!result.wasOk())
+        if (!saveResult.wasOk())
         {
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Save Song",
-                "Failed to save: " + result.getErrorMessage());
+                "Failed to save: " + saveResult.getErrorMessage());
         }
     });
 }

@@ -229,9 +229,42 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
 
     loopEngine->processBlock(numSamples, playing);
 
+    //--- 3a. BAR-END PENDING STOP (metronome first-recording) -----------------
+    if (pendingMetroBarEnd.load(std::memory_order_relaxed))
+    {
+        barEndSamplesRemaining -= numSamples;
+        if (barEndSamplesRemaining <= 0)
+        {
+            const int pch = barEndPendingChannel.load(std::memory_order_relaxed);
+            pendingMetroBarEnd.store(false, std::memory_order_release);
+            barEndPendingChannel.store(-1, std::memory_order_release);
+            const juce::int64 offset = barEndPlayheadOffset;
+            barEndPlayheadOffset = 0;
+            loopEngine->setLoopLength(barEndTargetSample);
+            loopEngine->setPlayhead(offset);   // 0 = normal, >0 = seamless snap-back
+            if (pch >= 0 && pch < 6 && channels[pch])
+                channels[pch]->stopRecording();
+            DBG("Metronome: loop set to " + juce::String(barEndTargetSample) +
+                " samples, playhead = " + juce::String(offset) + " samples");
+        }
+    }
+
     //--- 3b. STOP ALL CHANNELS WHEN TRANSPORT IS NOT RUNNING ------------------
     if (!playing)
     {
+        // Also cancel any pending bar-end stop, saving whatever has been recorded so far
+        if (pendingMetroBarEnd.load(std::memory_order_relaxed))
+        {
+            pendingMetroBarEnd.store(false, std::memory_order_release);
+            barEndPendingChannel.store(-1, std::memory_order_release);
+            barEndSamplesRemaining = 0;
+            const juce::int64 currentPos = loopEngine->getCurrentPlayhead();
+            if (currentPos > 0)
+            {
+                loopEngine->setLoopLength(currentPos);
+                loopEngine->resetPlayhead();
+            }
+        }
         for (auto& ch : channels)
         {
             if (!ch) continue;
@@ -295,12 +328,57 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
             {
                 if (auto* ch = channels[pch].get())
                 {
-                    if (!metronome->getEnabled() && loopEngine->getLoopLength() == 0)
+                    if (loopEngine->getLoopLength() == 0)
                         loopEngine->resetPlayhead();
                     ch->startRecording(false);
+
+                    // Fixed-length auto-stop after count-in
+                    if (metronome->getEnabled())
+                    {
+                        const int flBars = fixedLengthBars.load(std::memory_order_relaxed);
+                        if (flBars > 0)
+                        {
+                            const double bpm = loopEngine->getBPM();
+                            const double spb = (60.0 / juce::jmax(1.0, bpm)) * currentSampleRate;
+                            fixedLengthSamplesRemaining = static_cast<juce::int64>(
+                                flBars * metronome->getBeatsPerBar() * spb + 0.5);
+                            fixedLengthChannel.store(pch, std::memory_order_release);
+                            fixedLengthActive.store(true, std::memory_order_release);
+                        }
+                    }
                 }
             }
             pendingRecordChannel.store(-1, std::memory_order_release);
+        }
+    }
+
+    //--- 3e. FIXED-LENGTH RECORDING AUTO-STOP ---------------------------------
+    if (fixedLengthActive.load(std::memory_order_relaxed))
+    {
+        fixedLengthSamplesRemaining -= numSamples;
+        if (fixedLengthSamplesRemaining <= 0)
+        {
+            const int pch2 = fixedLengthChannel.load(std::memory_order_relaxed);
+            fixedLengthActive.store(false,  std::memory_order_release);
+            fixedLengthChannel.store(-1,    std::memory_order_release);
+
+            if (pch2 >= 0 && pch2 < 6 && channels[pch2] &&
+                channels[pch2]->getState() == ChannelState::Recording)
+            {
+                // Establish loop length if this is the first recording
+                if (loopEngine->getLoopLength() == 0)
+                {
+                    const double bpm = loopEngine->getBPM();
+                    const double spb = (60.0 / juce::jmax(1.0, bpm)) * currentSampleRate;
+                    const juce::int64 exactLen = static_cast<juce::int64>(
+                        fixedLengthBars.load(std::memory_order_relaxed) *
+                        metronome->getBeatsPerBar() * spb + 0.5);
+                    loopEngine->setLoopLength(exactLen);
+                    loopEngine->resetPlayhead();
+                }
+                channels[pch2]->stopRecording();
+                DBG("Fixed-length: auto-stopped recording on ch " + juce::String(pch2));
+            }
         }
     }
 
@@ -370,7 +448,7 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
     {
         case CommandType::SetBPM:
         {
-            if (isPlayingFlag.load(std::memory_order_relaxed)) { DBG("SetBPM ignored: playing"); break; }
+            if (hasAnyRecordings()) { DBG("SetBPM ignored: recordings exist"); break; }
             const double bpm = static_cast<double>(cmd.floatValue);
             loopEngine->setBPM(bpm);
             metronome->setBPM(bpm);
@@ -438,6 +516,13 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
 
         case CommandType::ResetSong:
         {
+            pendingMetroBarEnd.store(false, std::memory_order_release);
+            barEndPendingChannel.store(-1, std::memory_order_release);
+            barEndSamplesRemaining = 0;
+            barEndTargetSample = 0;
+            fixedLengthActive.store(false, std::memory_order_release);
+            fixedLengthChannel.store(-1,   std::memory_order_release);
+            fixedLengthSamplesRemaining = 0;
             for (auto& ch : channels)
                 if (ch) ch->clearLoop();
 
@@ -450,6 +535,13 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
 
         case CommandType::EmergencyStop:
         {
+            pendingMetroBarEnd.store(false, std::memory_order_release);
+            barEndPendingChannel.store(-1, std::memory_order_release);
+            barEndSamplesRemaining = 0;
+            barEndTargetSample = 0;
+            fixedLengthActive.store(false, std::memory_order_release);
+            fixedLengthChannel.store(-1,   std::memory_order_release);
+            fixedLengthSamplesRemaining = 0;
             isPlayingFlag.store(false, std::memory_order_release);
             loopEngine->resetPlayhead();
             for (auto& ch : channels)
@@ -481,7 +573,20 @@ void AudioEngine::processChannelCommand(const Command& cmd)
     {
         case CommandType::StartRecord:
         {
+            // Guard 1: already recording/overdubbing on this channel — ignore duplicate
+            {
+                const auto chState = channel->getState();
+                if (chState == ChannelState::Recording || chState == ChannelState::Overdubbing)
+                    break;
+            }
+
+            // Guard 2: count-in already pending for this exact channel — ignore duplicate
+            if (countInActive.load(std::memory_order_relaxed) &&
+                pendingRecordChannel.load(std::memory_order_relaxed) == cmd.channelIndex)
+                break;
+
             // Auto-start transport so the playhead advances
+            const bool wasPlaying = isPlayingFlag.load(std::memory_order_relaxed);
             isPlayingFlag.store(true, std::memory_order_release);
 
             const juce::int64 loopLen = loopEngine->getLoopLength();
@@ -504,14 +609,62 @@ void AudioEngine::processChannelCommand(const Command& cmd)
                         juce::jmax(1, static_cast<int>(ci * spb)));
                     countInActive.store(true, std::memory_order_release);
                     pendingRecordChannel.store(cmd.channelIndex, std::memory_order_release);
+                    // Reset playhead immediately so count-in starts at "beat 1" visually
+                    if (loopLen == 0)
+                        loopEngine->resetPlayhead();
                     DBG("Count-in: " + juce::String(ci) + " beat(s) = " +
                         juce::String(countInSamplesRemaining) + " samples");
                 }
                 else
                 {
-                    if (!metronome->getEnabled() && loopLen == 0)
-                        loopEngine->resetPlayhead();
-                    channel->startRecording(false);
+                    // Bar-quantized record start: if metronome is on and the transport was
+                    // already playing, defer recording to the next bar boundary.
+                    bool deferred = false;
+                    if (metronome->getEnabled() && wasPlaying
+                        && !countInActive.load(std::memory_order_relaxed))
+                    {
+                        const double bpm = loopEngine->getBPM();
+                        const double spb = (60.0 / juce::jmax(1.0, bpm)) * currentSampleRate;
+                        const juce::int64 barSamples = static_cast<juce::int64>(
+                            metronome->getBeatsPerBar() * spb + 0.5);
+                        const juce::int64 posInBar = loopEngine->getCurrentPlayhead() % barSamples;
+                        const juce::int64 samplesUntilBar = posInBar > 0
+                            ? barSamples - posInBar : 0;
+
+                        if (samplesUntilBar > 0)
+                        {
+                            countInSamplesRemaining = samplesUntilBar;
+                            countInActive.store(true, std::memory_order_release);
+                            pendingRecordChannel.store(cmd.channelIndex, std::memory_order_release);
+                            deferred = true;
+                            DBG("Bar-quantize: " + juce::String(samplesUntilBar) +
+                                " samples to bar start (" +
+                                juce::String(static_cast<double>(samplesUntilBar) /
+                                             currentSampleRate * 1000.0, 1) + " ms)");
+                        }
+                    }
+
+                    if (!deferred)
+                    {
+                        if (loopLen == 0)
+                            loopEngine->resetPlayhead();
+                        channel->startRecording(false);
+
+                        // Fixed-length auto-stop (metronome mode only)
+                        if (metronome->getEnabled())
+                        {
+                            const int flBars = fixedLengthBars.load(std::memory_order_relaxed);
+                            if (flBars > 0)
+                            {
+                                const double bpm = loopEngine->getBPM();
+                                const double spb = (60.0 / juce::jmax(1.0, bpm)) * currentSampleRate;
+                                fixedLengthSamplesRemaining = static_cast<juce::int64>(
+                                    flBars * metronome->getBeatsPerBar() * spb + 0.5);
+                                fixedLengthChannel.store(cmd.channelIndex, std::memory_order_release);
+                                fixedLengthActive.store(true, std::memory_order_release);
+                            }
+                        }
+                    }
                 }
             }
             break;
@@ -519,6 +672,10 @@ void AudioEngine::processChannelCommand(const Command& cmd)
 
         case CommandType::StopRecord:
         {
+            // Cancel any fixed-length countdown for this channel
+            if (fixedLengthChannel.load(std::memory_order_relaxed) == cmd.channelIndex)
+                fixedLengthActive.store(false, std::memory_order_release);
+
             const juce::int64 loopLen = loopEngine->getLoopLength();
             // Free mode: first recording sets the loop length exactly
             if (!metronome->getEnabled() && loopLen == 0)
@@ -534,33 +691,76 @@ void AudioEngine::processChannelCommand(const Command& cmd)
                 loopEngine->resetPlayhead();
                 channel->stopRecording();
             }
-            // Metronome mode: first recording — round to nearest bar.
-            // Samples beyond the recorded region are already silence (loop buffer is zeroed).
+            // Metronome mode: first recording — continue until end of current bar.
+            // If stop is requested a second time while waiting, stop immediately.
             else if (metronome->getEnabled() && loopLen == 0)
             {
                 const juce::int64 recorded = loopEngine->getCurrentPlayhead();
-                if (recorded > 0)
+
+                // Second StopRecord while already waiting for bar end → cancel, stop now
+                if (pendingMetroBarEnd.load(std::memory_order_relaxed) &&
+                    barEndPendingChannel.load(std::memory_order_relaxed) == cmd.channelIndex)
+                {
+                    pendingMetroBarEnd.store(false, std::memory_order_release);
+                    barEndPendingChannel.store(-1, std::memory_order_release);
+                    barEndSamplesRemaining = 0;
+                    barEndPlayheadOffset = 0;
+                    if (recorded > 0)
+                        loopEngine->setLoopLength(recorded);
+                    loopEngine->resetPlayhead();
+                    channel->stopRecording();
+                    DBG("Metronome bar-end cancelled — stopped immediately at " +
+                        juce::String(recorded) + " samples");
+                }
+                else if (recorded > 0)
                 {
                     const double bpm        = loopEngine->getBPM();
                     const double spb        = (60.0 / juce::jmax(1.0, bpm)) * currentSampleRate;
                     const int    bpb        = metronome->getBeatsPerBar();
                     const double barSamples = bpb * spb;
+                    const juce::int64 spbSamples = static_cast<juce::int64>(spb + 0.5);
 
-                    const juce::int64 numBars = juce::jmax(
-                        juce::int64(1),
-                        static_cast<juce::int64>(
-                            std::round(static_cast<double>(recorded) / barSamples)));
-                    const juce::int64 roundedLen =
-                        static_cast<juce::int64>(numBars * barSamples + 0.5);
+                    const juce::int64 completedBars = static_cast<juce::int64>(
+                        static_cast<double>(recorded) / barSamples);
+                    const juce::int64 lastBarEnd = static_cast<juce::int64>(
+                        completedBars * barSamples + 0.5);
+                    const juce::int64 posInBar = recorded - lastBarEnd;  // overshoot past bar end
 
-                    loopEngine->setLoopLength(roundedLen);
-                    DBG("Metronome bar-round: " + juce::String(recorded) + " samples → " +
-                        juce::String(numBars) + " bar(s) = " + juce::String(roundedLen) +
-                        " samples (" +
-                        juce::String(static_cast<double>(roundedLen) / currentSampleRate, 2) + "s)");
+                    // Case 1: pressed stop within 1 beat after a completed bar end.
+                    // Stop immediately here (command handler runs before playheadPos/loopLen
+                    // are captured), so the channel sees the correct state this same block.
+                    if (completedBars >= 1 && posInBar < spbSamples)
+                    {
+                        loopEngine->setLoopLength(lastBarEnd);
+                        loopEngine->setPlayhead(posInBar);   // offset so no jump in playback
+                        channel->stopRecording();
+                        DBG("Metronome: snap to bar end (" + juce::String(completedBars) +
+                            " bar(s)), playhead offset = " + juce::String(posInBar) + " samples (" +
+                            juce::String(static_cast<double>(posInBar) / currentSampleRate * 1000.0, 1) +
+                            " ms)");
+                    }
+                    else
+                    {
+                        // Case 2: mid-bar (beat 2 onwards) — keep recording until bar end,
+                        // then start playback from position 0.
+                        barEndTargetSample   = static_cast<juce::int64>(
+                            (completedBars + 1) * barSamples + 0.5);
+                        const juce::int64 samplesUntilBarEnd = barEndTargetSample - recorded;
+                        barEndSamplesRemaining = juce::jmax(juce::int64(1), samplesUntilBarEnd);
+                        barEndPlayheadOffset = 0;
+                        barEndPendingChannel.store(cmd.channelIndex, std::memory_order_release);
+                        pendingMetroBarEnd.store(true, std::memory_order_release);
+                        DBG("Metronome: waiting for bar end at sample " +
+                            juce::String(barEndTargetSample) + " (" +
+                            juce::String(barEndSamplesRemaining) + " samples remaining)");
+                    }
+                    // Recording continues in Case 2 — do NOT stop the channel yet
                 }
-                loopEngine->resetPlayhead();
-                channel->stopRecording();
+                else
+                {
+                    loopEngine->resetPlayhead();
+                    channel->stopRecording();
+                }
             }
             else if (latchMode.load(std::memory_order_relaxed))
             {
@@ -711,11 +911,54 @@ bool AudioEngine::sendCommand(const Command& cmd)
 
 void AudioEngine::setPlaying(bool shouldPlay)
 {
+    if (!shouldPlay)
+    {
+        // Memorize which channels are currently playing or overdubbing
+        uint8_t mask = 0;
+        for (int i = 0; i < 6; ++i)
+        {
+            auto* ch = channels[i].get();
+            if (ch)
+            {
+                const auto st = ch->getState();
+                if (st == ChannelState::Playing || st == ChannelState::Overdubbing)
+                    mask |= static_cast<uint8_t>(1u << i);
+            }
+        }
+        lastActiveChannels.store(mask, std::memory_order_release);
+    }
+
     // When all channels are empty, always start (and stop) from position 0.
     if (!hasAnyRecordings())
         loopEngine->resetPlayhead();
 
     isPlayingFlag.store(shouldPlay, std::memory_order_release);
+
+    if (shouldPlay)
+    {
+        uint8_t mask = lastActiveChannels.load(std::memory_order_acquire);
+
+        // Validate: remove channels that no longer have recordings
+        uint8_t validMask = 0;
+        for (int i = 0; i < 6; ++i)
+            if ((mask & (1u << i)) && channels[i] && channels[i]->hasLoop())
+                validMask |= static_cast<uint8_t>(1u << i);
+
+        if (validMask != 0)
+        {
+            // Restart the channels that were playing before stop
+            for (int i = 0; i < 6; ++i)
+                if (validMask & (1u << i))
+                    sendCommand(Command::startPlayback(i));
+        }
+        else if (hasAnyRecordings())
+        {
+            // No previous active channels — start all channels with recordings
+            for (int i = 0; i < 6; ++i)
+                if (channels[i] && channels[i]->hasLoop())
+                    sendCommand(Command::startPlayback(i));
+        }
+    }
 }
 
 void AudioEngine::setOverdubMode(bool enabled)
@@ -980,6 +1223,9 @@ int AudioEngine::getBeatsPerBar() const
     return metronome->getBeatsPerBar();
 }
 
+void AudioEngine::setMetronomeGain(float gain) { metronome->setMasterGain(gain); }
+float AudioEngine::getMetronomeGain() const    { return metronome->getMasterGain(); }
+
 //==============================================================================
 // Song Reset (Message Thread)
 //==============================================================================
@@ -1023,6 +1269,9 @@ void AudioEngine::setCountInBeats(int beats)
 {
     countInBeats.store(juce::jlimit(0, 16, beats), std::memory_order_release);
 }
+
+void AudioEngine::setFixedLengthBars(int bars) { fixedLengthBars.store(bars, std::memory_order_release); }
+int  AudioEngine::getFixedLengthBars() const   { return fixedLengthBars.load(std::memory_order_relaxed); }
 
 //==============================================================================
 // Channel Names (Message Thread)

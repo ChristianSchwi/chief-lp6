@@ -104,6 +104,27 @@ public:
      * @return true if valid song directory
      */
     static bool isValidSongDirectory(const juce::File& songDirectory);
+
+    //==========================================================================
+    // Current Song (auto-save / auto-restore on close/open)
+    //==========================================================================
+
+    /** Returns the fixed directory used for the auto-saved current session. */
+    static juce::File getCurrentSongDirectory();
+
+    /**
+     * @brief Save the current engine state to the fixed "currentSong" slot.
+     * Includes channel settings, VSTs, metronome settings, and loop audio.
+     * Call from the message thread (audio device should be stopped first).
+     */
+    juce::Result saveCurrentSong(AudioEngine& audioEngine);
+
+    /**
+     * @brief Restore the last auto-saved session from the "currentSong" slot.
+     * Call from the message thread after audio is initialised.
+     * Silently fails if no auto-save exists yet.
+     */
+    juce::Result loadCurrentSong(AudioEngine& audioEngine);
     
 private:
     //==========================================================================

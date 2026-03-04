@@ -113,6 +113,12 @@ public:
      * @brief Reset playhead to zero
      */
     void resetPlayhead();
+
+    /**
+     * @brief Set playhead to an arbitrary position (clamped to loop length).
+     * Used to offset playback start so no jump occurs after a bar-end stop.
+     */
+    void setPlayhead(juce::int64 position);
     
     /**
      * @brief Prepare for new sample rate

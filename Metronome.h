@@ -62,6 +62,10 @@ public:
     /** Amplitude for the accented click (0-1). Default 1.0. */
     void setAccentAmplitude(float amp) { accentAmplitude.store(amp, std::memory_order_release); }
 
+    /** Master volume for all click sounds (0 = silent, 1 = full). Default 1.0. */
+    void  setMasterGain(float g) { masterGain.store(juce::jlimit(0.0f, 1.0f, g), std::memory_order_release); }
+    float getMasterGain() const  { return masterGain.load(std::memory_order_relaxed); }
+
     //==========================================================================
     // Audio-Thread — jeden Block aufrufen
     void processBlock(float* const* outputChannelData,
@@ -84,6 +88,7 @@ private:
     std::atomic<int>    beatsPerBar     {4};
     std::atomic<double> accentFreqHz    {1600.0};  // higher pitch on bar beat 1
     std::atomic<float>  accentAmplitude {1.0f};    // slightly louder on bar beat 1
+    std::atomic<float>  masterGain      {1.0f};    // overall click volume (0-1)
 
     //==========================================================================
     // Audio-Thread only (keine Atomics nötig)

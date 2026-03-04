@@ -7,6 +7,8 @@ MainComponent::MainComponent()
     songManager  = std::make_unique<SongManager>();
     showManager  = std::make_unique<ShowManager>();
 
+    loadPreferences();
+
     // --- Audio init first ---
     initializeAudio();
 
@@ -31,10 +33,23 @@ MainComponent::MainComponent()
     showComponent->setAudioReady(true);
     addAndMakeVisible(showComponent.get());
 
+    // --- Auto-recall last session if preference is set ---
+    if (autoRecallLastSession)
+    {
+        auto result = songManager->loadCurrentSong(audioEngine);
+        if (!result.wasOk())
+            DBG("Auto-recall: " + result.getErrorMessage()); // silently ignore on first run
+    }
+
     // --- Info label ---
     infoLabel.setJustificationType(juce::Justification::centredLeft);
     infoLabel.setFont(juce::Font(12.0f));
     addAndMakeVisible(infoLabel);
+
+    // --- Help button ---
+    helpButton.setTooltip("Keyboard shortcuts and MIDI mapping reference");
+    helpButton.onClick = [this] { showHelpMenu(); };
+    addAndMakeVisible(helpButton);
 
     // --- Preferences button (⚙) ---
     preferencesButton.setButtonText(juce::CharPointer_UTF8("\xe2\x9a\x99\xef\xb8\x8f Prefs"));
@@ -42,7 +57,9 @@ MainComponent::MainComponent()
     preferencesButton.onClick = [this]
     {
         auto* prefs = new PreferencesComponent(
-            audioEngine.getMidiLearnManager());
+            audioEngine.getMidiLearnManager(),
+            [this]       { return autoRecallLastSession; },
+            [this](bool v) { autoRecallLastSession = v; savePreferences(); });
 
         juce::DialogWindow::LaunchOptions opts;
         opts.content.setOwned(prefs);
@@ -100,11 +117,20 @@ MainComponent::MainComponent()
     addKeyListener(this);
 
     setSize(1400, 780);
+    startTimerHz(20);  // 20 Hz for live status info in the info bar
 }
 
 MainComponent::~MainComponent()
 {
+    stopTimer();
     audioEngine.getDeviceManager().removeChangeListener(this);
+
+    // Stop audio device before reading loop buffers (required for thread safety)
+    audioEngine.getDeviceManager().closeAudioDevice();
+
+    // Auto-save current session (channel settings, VSTs, metronome, loops, routings)
+    songManager->saveCurrentSong(audioEngine);
+    savePreferences();
 }
 
 //==============================================================================
@@ -130,6 +156,7 @@ void MainComponent::resized()
     logoArea = infoRow.removeFromRight(90).reduced(2, 2);
     audioSettingsButton.setBounds(infoRow.removeFromRight(120).reduced(2, 2));
     preferencesButton  .setBounds(infoRow.removeFromRight(90) .reduced(2, 2));
+    helpButton         .setBounds(infoRow.removeFromRight(70) .reduced(2, 2));
     infoLabel.setBounds(infoRow.reduced(4, 0));
 
     // Remaining area: transport (left panel) + 6 channel strips
@@ -155,11 +182,62 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
 
 void MainComponent::updateInfoLabel()
 {
+    // Called once on device change; timerCallback() keeps it live at 20 Hz.
+    timerCallback();
+}
+
+void MainComponent::timerCallback()
+{
+    auto& le = audioEngine.getLoopEngine();
+    const bool   metroActive = audioEngine.getMetronome().getEnabled();
+    const juce::int64 loopLen = le.getLoopLength();
+    const double cpu          = audioEngine.getCPUUsage();
+
+    const juce::String loopStr = loopLen > 0
+        ? juce::String(le.getLoopLengthSeconds(), 2) + "s"
+        : "---";
+
+    // Format last MIDI message
+    auto& mlm = audioEngine.getMidiLearnManager();
+    juce::String midiStr = "---";
+    if (mlm.hasReceivedMidi())
+    {
+        const auto& m = mlm.getLastMidiMessage();
+        if (m.isController())
+            midiStr = "CC" + juce::String(m.getControllerNumber())
+                    + "=" + juce::String(m.getControllerValue())
+                    + " ch" + juce::String(m.getChannel());
+        else if (m.isNoteOn())
+            midiStr = "NoteOn " + juce::MidiMessage::getMidiNoteName(m.getNoteNumber(), true, true, 4)
+                    + " v" + juce::String(m.getVelocity())
+                    + " ch" + juce::String(m.getChannel());
+        else if (m.isNoteOff())
+            midiStr = "NoteOff " + juce::MidiMessage::getMidiNoteName(m.getNoteNumber(), true, true, 4)
+                    + " ch" + juce::String(m.getChannel());
+        else if (m.isProgramChange())
+            midiStr = "PC " + juce::String(m.getProgramChangeNumber())
+                    + " ch" + juce::String(m.getChannel());
+        else if (m.isPitchWheel())
+            midiStr = "PW " + juce::String(m.getPitchWheelValue())
+                    + " ch" + juce::String(m.getChannel());
+        else if (m.isChannelPressure())
+            midiStr = "ChAT " + juce::String(m.getChannelPressureValue())
+                    + " ch" + juce::String(m.getChannel());
+        else
+            midiStr = "0x" + juce::String::toHexString(m.getRawData()[0] & 0xF0)
+                    + " ch" + juce::String(m.getChannel());
+    }
+
     infoLabel.setText(
         "Audio: " + juce::String(audioEngine.getSampleRate(), 0) + " Hz  |  " +
         juce::String(audioEngine.getBufferSize()) + " samples  |  " +
         juce::String(audioEngine.getNumInputChannels()) + " in / " +
-        juce::String(audioEngine.getNumOutputChannels()) + " out",
+        juce::String(audioEngine.getNumOutputChannels()) + " out  |  " +
+        "Mode: " + juce::String(metroActive ? "Metronome" : "Free") + "  |  " +
+        "Loop: " + loopStr + "  |  " +
+        "Pos: " + juce::String(le.getPlayheadSeconds(), 2) + "s  |  " +
+        "CPU: " + juce::String(cpu, 1) + "%  |  " +
+        "MIDI: " + midiStr,
         juce::dontSendNotification);
 }
 
@@ -217,6 +295,22 @@ bool MainComponent::keyPressed(const juce::KeyPress& key, juce::Component*)
     if (code == juce::KeyPress::rightKey)
     {
         audioEngine.nextChannel();
+        return true;
+    }
+
+    // M — toggle mute on active channel
+    if (code == 'm' || code == 'M')
+    {
+        const int ch = audioEngine.getActiveChannel();
+        auto* channel = audioEngine.getChannel(ch);
+        if (channel)
+        {
+            Command cmd;
+            cmd.type         = CommandType::SetMute;
+            cmd.channelIndex = ch;
+            cmd.boolValue    = !channel->isMuted();
+            audioEngine.sendCommand(cmd);
+        }
         return true;
     }
 
@@ -278,9 +372,127 @@ void MainComponent::triggerChannel(int channelIndex)
 }
 
 //==============================================================================
+// Preferences
+//==============================================================================
+
+juce::File MainComponent::getPreferencesFile() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+               .getChildFile("chief")
+               .getChildFile("preferences.json");
+}
+
+void MainComponent::loadPreferences()
+{
+    const auto file = getPreferencesFile();
+    if (!file.existsAsFile()) return;
+
+    const auto json = juce::JSON::parse(file.loadFileAsString());
+    if (const auto* obj = json.getDynamicObject())
+        autoRecallLastSession = (bool)obj->getProperty("auto_recall_last_session");
+}
+
+void MainComponent::savePreferences()
+{
+    auto* obj = new juce::DynamicObject();
+    obj->setProperty("auto_recall_last_session", autoRecallLastSession);
+
+    const auto file = getPreferencesFile();
+    file.getParentDirectory().createDirectory();
+    file.replaceWithText(juce::JSON::toString(juce::var(obj), true));
+}
+
+//==============================================================================
+// Help Dialogs
+//==============================================================================
+
+void MainComponent::showHelpMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem(1, "Show shortcuts");
+    menu.addItem(2, "Show MIDI mappings");
+    menu.showMenuAsync({}, [this](int id) {
+        if (id == 1) showShortcutsDialog();
+        if (id == 2) showMidiMappingsDialog();
+    });
+}
+
+void MainComponent::showShortcutsDialog()
+{
+    const juce::String text =
+        "Space          Global Play / Stop\n"
+        "R              Trigger active channel (record -> stop -> play -> stop ...)\n"
+        "1 - 6          Select + trigger channel N\n"
+        "O              Toggle Overdub Mode\n"
+        "L              Toggle Latch Mode\n"
+        "M              Toggle Mute on active channel\n"
+        "C              Clear active channel loop\n"
+        "<- / ->        Previous / Next channel";
+
+    juce::AlertWindow::showMessageBoxAsync(
+        juce::AlertWindow::InfoIcon,
+        "Keyboard Shortcuts",
+        text);
+}
+
+void MainComponent::showMidiMappingsDialog()
+{
+    const auto& mappings = audioEngine.getMidiLearnManager().getAllMappings();
+
+    if (mappings.empty())
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::InfoIcon,
+            "MIDI Mappings",
+            "No MIDI mappings defined.");
+        return;
+    }
+
+    auto formatMapping = [](const MidiMapping& m) -> juce::String
+    {
+        juce::String src;
+        if (m.ccNumber >= 0)
+            src = "CC " + juce::String(m.ccNumber) + " (ch " + juce::String(m.midiChannel) + ")";
+        else if (m.noteNumber >= 0)
+            src = "Note " + juce::String(m.noteNumber) + " (ch " + juce::String(m.midiChannel) + ")";
+        else if (m.programNumber >= 0)
+            src = "PC " + juce::String(m.programNumber) + " (ch " + juce::String(m.midiChannel) + ")";
+        else if (m.rawStatusNibble >= 0)
+            src = "Raw 0x" + juce::String::toHexString(m.rawStatusNibble) + " (ch " + juce::String(m.midiChannel) + ")";
+
+        const juce::String chStr = m.channelIndex >= 0
+            ? "Ch " + juce::String(m.channelIndex + 1)
+            : "Global";
+
+        return "[" + chStr + "]  " + MidiLearnManager::targetName(m.target) + "  ->  " + src;
+    };
+
+    juce::String text;
+    for (const auto& m : mappings)
+    {
+        if (m.isValid())
+            text += formatMapping(m) + "\n";
+    }
+
+    if (text.isEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::InfoIcon,
+            "MIDI Mappings",
+            "No MIDI mappings defined.");
+        return;
+    }
+
+    juce::AlertWindow::showMessageBoxAsync(
+        juce::AlertWindow::InfoIcon,
+        "MIDI Mappings",
+        text.trimEnd());
+}
+
+//==============================================================================
 void MainComponent::initializeAudio()
 {
-    const juce::String error = audioEngine.initialiseAudio(2, 2, 44100.0, 512);
+    const juce::String error = audioEngine.initialiseAudio(32, 32, 44100.0, 512);
 
     if (error.isNotEmpty())
     {

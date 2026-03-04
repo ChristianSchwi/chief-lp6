@@ -95,6 +95,14 @@ void LoopEngine::resetPlayhead()
     playheadPosition.store(0, std::memory_order_release);
 }
 
+void LoopEngine::setPlayhead(juce::int64 position)
+{
+    const juce::int64 loopLen = loopLengthSamples.load(std::memory_order_relaxed);
+    if (loopLen > 0 && position >= loopLen)
+        position = position % loopLen;
+    playheadPosition.store(juce::jmax(juce::int64(0), position), std::memory_order_release);
+}
+
 void LoopEngine::setSampleRate(double newSampleRate)
 {
     jassert(newSampleRate > 0.0);

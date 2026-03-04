@@ -81,14 +81,16 @@ void RoutingComponent::populateChannelBoxes()
         inputRightBox.addItem(name, i + 2);
     }
 
-    // Output boxes — same scheme, no "None" option
+    // Output boxes — left uses ID = hardware index + 1
+    //                right adds "Same as Left (mono)" at ID 1, hardware at ID i + 2
     outputLeftBox.clear();
     outputRightBox.clear();
+    outputRightBox.addItem("Same as Left (mono)", 1);
     for (int i = 0; i < numOut; ++i)
     {
         juce::String name = "Out " + juce::String(i + 1);
         outputLeftBox.addItem(name,  i + 1);
-        outputRightBox.addItem(name, i + 1);
+        outputRightBox.addItem(name, i + 2);
     }
 }
 
@@ -110,8 +112,12 @@ void RoutingComponent::loadCurrentRouting()
                                                               : routing.inputChannelRight + 2,
                                 juce::dontSendNotification);
 
-    outputLeftBox.setSelectedId(routing.outputChannelLeft  + 1, juce::dontSendNotification);
-    outputRightBox.setSelectedId(routing.outputChannelRight + 1, juce::dontSendNotification);
+    outputLeftBox.setSelectedId(routing.outputChannelLeft + 1, juce::dontSendNotification);
+    // Right output: "Same as Left (mono)" if equal, otherwise hardware channel (ID = index + 2)
+    if (routing.outputChannelRight == routing.outputChannelLeft)
+        outputRightBox.setSelectedId(1, juce::dontSendNotification);
+    else
+        outputRightBox.setSelectedId(routing.outputChannelRight + 2, juce::dontSendNotification);
 
     if (isVSTiChannel)
         midiChannelBox.setSelectedId(routing.midiChannelFilter + 1, juce::dontSendNotification);
@@ -131,8 +137,11 @@ void RoutingComponent::applyRouting()
     config.inputChannelLeft  = (leftId  <= 1) ? -1 : leftId  - 2;
     config.inputChannelRight = (rightId <= 1) ? -1 : rightId - 2;
 
-    config.outputChannelLeft  = outputLeftBox.getSelectedId()  - 1;
-    config.outputChannelRight = outputRightBox.getSelectedId() - 1;
+    config.outputChannelLeft  = outputLeftBox.getSelectedId() - 1;
+    // Right output: ID 1 = "Same as Left (mono)", else ID - 2 = hardware index
+    const int rightOutputId = outputRightBox.getSelectedId();
+    config.outputChannelRight = (rightOutputId <= 1) ? config.outputChannelLeft
+                                                     : rightOutputId - 2;
 
     if (isVSTiChannel)
         config.midiChannelFilter = midiChannelBox.getSelectedId() - 1;
@@ -144,9 +153,9 @@ void RoutingComponent::applyRouting()
     cmd.data.routing = config;
     audioEngine.sendCommand(cmd);
 
-    // Schließt den CallOutBox nach dem Anwenden
-    if (auto* parent = findParentComponentOfClass<juce::CallOutBox>())
-        parent->dismiss();
+    // Close the parent DialogWindow after applying
+    if (auto* dw = findParentComponentOfClass<juce::DialogWindow>())
+        dw->exitModalState(0);
 }
 
 //==============================================================================

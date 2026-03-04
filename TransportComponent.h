@@ -57,18 +57,19 @@ private:
     // Loop settings
     juce::Label        bpmLabel   {"", "BPM:"};
     juce::Slider       bpmSlider;
-    juce::Label        beatsLabel {"", "Beats:"};
-    juce::Slider       beatsSlider;
+    juce::TextButton   tapButton  {"Tap"};
     juce::ToggleButton latchModeButton{"Latch Mode"};
 
     //==========================================================================
     // Metronome
     juce::ToggleButton metronomeButton    {"Metronome"};
     juce::ToggleButton metronomeMuteButton{"Mute Click"};
-    juce::Label        beatsPerBarLabel   {"", "Bar:"};
+    juce::Label        beatsPerBarLabel   {"", "Beats:"};
     juce::Slider       beatsPerBarSlider;
     juce::Label        metroOutLabel      {"", "Metro Out:"};
     juce::ComboBox     metroOutputBox;
+    juce::Label        metroGainLabel     {"", "Volume:"};
+    juce::Slider       metroGainSlider;
 
     //==========================================================================
     // Auto-Start
@@ -82,18 +83,20 @@ private:
     juce::ComboBox countInBox;
 
     //==========================================================================
+    // Fixed-Length Recording
+    juce::Label      fixedLenLabel    {"", "Fix len:"};
+    juce::TextEditor fixedLenEditor;
+    juce::Label      fixedLenBarsLabel{"", "bars"};
+    juce::TextButton fixedLenPlusBtn  {"+"};
+    juce::TextButton fixedLenMinusBtn {"-"};
+
+    //==========================================================================
     // Reset Song
     juce::TextButton resetSongButton{"Reset Song"};
 
     //==========================================================================
-    // Display
-    juce::Label modeLabel      {"", "Mode: Free"};
-    juce::Label loopLengthLabel{"", "Loop: ---"};
-    juce::Label playheadLabel  {"", "Pos:  0.00s"};
-    juce::Label cpuLabel       {"", "CPU: 0%"};
-
-    //==========================================================================
     bool lastHasRecordings { false };
+    std::vector<juce::int64> tapTimes;
 
     struct MetroOutEntry { int left; int right; };
     juce::Array<MetroOutEntry> metroOutEntries;
@@ -108,15 +111,18 @@ private:
     void nextChannelClicked();
     void showGlobalMidiLearnMenu();
     void bpmChanged();
-    void beatsChanged();
+    void tapClicked();
     void latchModeChanged();
     void metronomeChanged();
     void metronomeMuteChanged();
     void beatsPerBarChanged();
     void metroOutputChanged();
+    void metroGainChanged();
     void autoStartChanged();
     void autoStartThresholdChanged();
     void countInChanged();
+    void applyFixedLenEditor();
+    void fixedLenStep(int direction);
     void resetSongClicked();
     void populateMetroOutputBox();
 

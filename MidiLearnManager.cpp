@@ -28,6 +28,7 @@ MidiLearnManager::~MidiLearnManager()
 
 void MidiLearnManager::startLearning(int channelIndex, MidiControlTarget target)
 {
+    unlearningActive.store(false, std::memory_order_release);  // cancel any unlearning
     juce::ScopedLock sl(learningLock);
     currentLearningTarget.channelIndex = channelIndex;
     currentLearningTarget.target       = target;
@@ -35,7 +36,7 @@ void MidiLearnManager::startLearning(int channelIndex, MidiControlTarget target)
     currentLearningTarget.noteNumber   = -1;
     learningActive.store(true, std::memory_order_release);
 
-    DBG("MIDI Learn: Warte auf Eingabe für Channel " +
+    DBG("MIDI Learn: Waiting for input on channel " +
         juce::String(channelIndex) + " / " + targetName(target));
 }
 
@@ -43,6 +44,23 @@ void MidiLearnManager::stopLearning()
 {
     learningActive.store(false, std::memory_order_release);
     DBG("MIDI Learn: Abgebrochen");
+}
+
+//==============================================================================
+// Unlearn-Modus
+//==============================================================================
+
+void MidiLearnManager::startUnlearning()
+{
+    learningActive.store(false, std::memory_order_release);   // cancel any active learning
+    unlearningActive.store(true, std::memory_order_release);
+    DBG("MIDI Unlearn: active");
+}
+
+void MidiLearnManager::stopUnlearning()
+{
+    unlearningActive.store(false, std::memory_order_release);
+    DBG("MIDI Unlearn: stopped");
 }
 
 //==============================================================================
@@ -93,6 +111,13 @@ void MidiLearnManager::removeMapping(int channelIndex, MidiControlTarget target)
     saveImmediately();
 }
 
+void MidiLearnManager::removeAllMappings()
+{
+    juce::ScopedLock sl(mappingsLock);
+    mappings.clear();
+    saveImmediately();
+}
+
 MidiMapping MidiLearnManager::getMapping(int channelIndex, MidiControlTarget target) const
 {
     MidiMapping dummy;
@@ -123,20 +148,23 @@ std::vector<MidiMapping> MidiLearnManager::getAllMappings() const
 
 void MidiLearnManager::postMidiMessage(const juce::MidiMessage& msg)
 {
-    // Nur CC und Note-On/Off interessieren uns
-    if (!msg.isController() && !msg.isNoteOn() && !msg.isNoteOff())
+    // Accept all channel voice messages (status < 0xF0); reject system messages.
+    if ((msg.getRawData()[0] & 0xF0) >= 0xF0)
         return;
 
     if (fifo.getFreeSpace() < 1)
-        return;  // Queue voll
+        return;
 
     int idx1, size1, idx2, size2;
     fifo.prepareToWrite(1, idx1, size1, idx2, size2);
     if (size1 > 0)
-    {
         midiQueue[idx1].message = msg;
-        fifo.finishedWrite(1);
-    }
+    else if (size2 > 0)
+        midiQueue[idx2].message = msg;
+    else
+        return;
+
+    fifo.finishedWrite(1);
 }
 
 //==============================================================================
@@ -158,11 +186,22 @@ void MidiLearnManager::timerCallback()
 
 void MidiLearnManager::processMidiMessage(const juce::MidiMessage& msg)
 {
+    // Track last received message for display in the status bar (message thread only).
+    lastProcessedMidi = msg;
+    lastMidiReceived  = true;
+
     // ---- Learn-Modus ----
     if (learningActive.load(std::memory_order_acquire))
     {
-        // Nur CC oder Note-On als Trigger akzeptieren
-        if (!msg.isController() && !msg.isNoteOn())
+        // Skip Note-Off — it would immediately shadow any Note-On assignment.
+        if (msg.isNoteOff())
+            return;
+
+        // Skip bank-select controllers (CC 0 = Bank Select MSB, CC 32 = Bank Select LSB).
+        // These are almost always sent by MIDI hardware immediately before a Program Change
+        // and would otherwise shadow the PC message the user is trying to learn.
+        if (msg.isController() &&
+            (msg.getControllerNumber() == 0 || msg.getControllerNumber() == 32))
             return;
 
         MidiMapping newMapping;
@@ -171,17 +210,45 @@ void MidiLearnManager::processMidiMessage(const juce::MidiMessage& msg)
             newMapping = currentLearningTarget;
         }
 
-        newMapping.midiChannel = msg.getChannel();
+        newMapping.midiChannel     = msg.getChannel();
+        newMapping.ccNumber        = -1;
+        newMapping.noteNumber      = -1;
+        newMapping.programNumber   = -1;
+        newMapping.rawStatusNibble = -1;
+        newMapping.rawData1        = -1;
 
-        if (msg.isController())
+  
+        if (msg.isProgramChange())
         {
-            newMapping.ccNumber   = msg.getControllerNumber();
-            newMapping.noteNumber = -1;
+            newMapping.programNumber = msg.getProgramChangeNumber();
+        }
+        else if (msg.isController())
+        {
+            newMapping.ccNumber = msg.getControllerNumber();
+        }
+        else if (msg.isNoteOn())
+        {
+            newMapping.noteNumber = msg.getNoteNumber();
+        }
+        else if (msg.isPitchWheel())
+        {
+            newMapping.rawStatusNibble = 0xE;
+        }
+        else if (msg.isChannelPressure())
+        {
+            newMapping.rawStatusNibble = 0xD;
+        }
+        else if (msg.isAftertouch())
+        {
+            newMapping.rawStatusNibble = 0xA;
+            newMapping.rawData1        = msg.getNoteNumber();  // match specific note
         }
         else
         {
-            newMapping.noteNumber = msg.getNoteNumber();
-            newMapping.ccNumber   = -1;
+            // Generic channel message: store status nibble + first data byte.
+            const auto* raw = msg.getRawData();
+            newMapping.rawStatusNibble = (raw[0] & 0xF0) >> 4;
+            newMapping.rawData1        = msg.getRawDataSize() > 1 ? raw[1] : -1;
         }
 
         // Wertebereich je nach Control-Typ
@@ -209,8 +276,11 @@ void MidiLearnManager::processMidiMessage(const juce::MidiMessage& msg)
         learningActive.store(false, std::memory_order_release);
         saveImmediately();
 
-        DBG("MIDI Learn: Zugewiesen – CC " + juce::String(newMapping.ccNumber) +
+        DBG("MIDI Learn: Zugewiesen - CC " + juce::String(newMapping.ccNumber) +
             " / Note " + juce::String(newMapping.noteNumber) +
+            " / PC " + juce::String(newMapping.programNumber) +
+            " / Raw 0x" + juce::String::toHexString(newMapping.rawStatusNibble) +
+            " d1=" + juce::String(newMapping.rawData1) +
             " → Ch" + juce::String(newMapping.channelIndex) +
             " " + targetName(newMapping.target));
 
@@ -221,6 +291,13 @@ void MidiLearnManager::processMidiMessage(const juce::MidiMessage& msg)
     }
 
     // ---- Normal-Modus: Mappings anwenden ----
+
+    // Ignore Bank Select (CC 0 = MSB, CC 32 = LSB): these are sent by hardware
+    // immediately before a Program Change and must not trigger any mapped actions.
+    if (msg.isController() &&
+        (msg.getControllerNumber() == 0 || msg.getControllerNumber() == 32))
+        return;
+
     juce::ScopedLock sl(mappingsLock);
     for (auto& kv : mappings)
     {
@@ -239,6 +316,20 @@ void MidiLearnManager::processMidiMessage(const juce::MidiMessage& msg)
         if (m.noteNumber >= 0 && (msg.isNoteOn() || msg.isNoteOff()) &&
             msg.getNoteNumber() == m.noteNumber)
             matches = true;
+        if (m.programNumber >= 0 && msg.isProgramChange() &&
+            msg.getProgramChangeNumber() == m.programNumber)
+            matches = true;
+        if (m.rawStatusNibble >= 0)
+        {
+            const int nibble = (msg.getRawData()[0] & 0xF0) >> 4;
+            if (nibble == m.rawStatusNibble)
+            {
+                if (m.rawData1 < 0)
+                    matches = true;  // no data1 constraint
+                else if (msg.getRawDataSize() > 1 && msg.getRawData()[1] == m.rawData1)
+                    matches = true;
+            }
+        }
 
         if (matches)
             applyMapping(m, msg);
@@ -251,10 +342,25 @@ void MidiLearnManager::applyMapping(const MidiMapping& m, const juce::MidiMessag
     float norm = 0.0f;
     if (msg.isController())
         norm = msg.getControllerValue() / 127.0f;
-    else if (msg.isNoteOn())
+    else if (msg.isNoteOn() || msg.isProgramChange())
         norm = 1.0f;
     else if (msg.isNoteOff())
         norm = 0.0f;
+    else if (msg.isPitchWheel())
+        norm = (msg.getPitchWheelValue() + 8192) / 16383.0f;  // -8192..+8191 → 0..1
+    else if (msg.isChannelPressure())
+        norm = msg.getChannelPressureValue() / 127.0f;
+    else if (msg.isAftertouch())
+        norm = msg.getAfterTouchValue() / 127.0f;
+    else
+    {
+        // Generic: use the second or third raw byte as value.
+        const auto* raw = msg.getRawData();
+        const int sz = msg.getRawDataSize();
+        norm = sz > 2 ? raw[2] / 127.0f
+             : sz > 1 ? raw[1] / 127.0f
+             : 1.0f;
+    }
 
     const float mapped = m.minValue + norm * (m.maxValue - m.minValue);
 
@@ -447,13 +553,16 @@ bool MidiLearnManager::saveMappings(const juce::File& file) const
             continue;
 
         auto* entry = xml->createNewChildElement("Mapping");
-        entry->setAttribute("channelIndex",  m.channelIndex);
-        entry->setAttribute("target",        static_cast<int>(m.target));
-        entry->setAttribute("midiChannel",   m.midiChannel);
-        entry->setAttribute("ccNumber",      m.ccNumber);
-        entry->setAttribute("noteNumber",    m.noteNumber);
-        entry->setAttribute("minValue",      m.minValue);
-        entry->setAttribute("maxValue",      m.maxValue);
+        entry->setAttribute("channelIndex",    m.channelIndex);
+        entry->setAttribute("target",          static_cast<int>(m.target));
+        entry->setAttribute("midiChannel",     m.midiChannel);
+        entry->setAttribute("ccNumber",        m.ccNumber);
+        entry->setAttribute("noteNumber",      m.noteNumber);
+        entry->setAttribute("programNumber",   m.programNumber);
+        entry->setAttribute("rawStatusNibble", m.rawStatusNibble);
+        entry->setAttribute("rawData1",        m.rawData1);
+        entry->setAttribute("minValue",        m.minValue);
+        entry->setAttribute("maxValue",        m.maxValue);
     }
 
     bool ok = xml->writeTo(file);
@@ -493,16 +602,19 @@ bool MidiLearnManager::loadMappings(const juce::File& file)
     for (auto* entry : xml->getChildIterator())
     {
         MidiMapping m;
-        m.channelIndex  = entry->getIntAttribute("channelIndex",  -1);
-        m.target        = static_cast<MidiControlTarget>(
-                              entry->getIntAttribute("target", 0));
-        m.midiChannel   = entry->getIntAttribute("midiChannel",   0);
-        m.ccNumber      = entry->getIntAttribute("ccNumber",      -1);
-        m.noteNumber    = entry->getIntAttribute("noteNumber",    -1);
-        m.minValue      = static_cast<float>(
-                              entry->getDoubleAttribute("minValue", 0.0));
-        m.maxValue      = static_cast<float>(
-                              entry->getDoubleAttribute("maxValue", 1.0));
+        m.channelIndex     = entry->getIntAttribute("channelIndex",    -1);
+        m.target           = static_cast<MidiControlTarget>(
+                                 entry->getIntAttribute("target", 0));
+        m.midiChannel      = entry->getIntAttribute("midiChannel",     0);
+        m.ccNumber         = entry->getIntAttribute("ccNumber",        -1);
+        m.noteNumber       = entry->getIntAttribute("noteNumber",      -1);
+        m.programNumber    = entry->getIntAttribute("programNumber",   -1);
+        m.rawStatusNibble  = entry->getIntAttribute("rawStatusNibble", -1);
+        m.rawData1         = entry->getIntAttribute("rawData1",        -1);
+        m.minValue         = static_cast<float>(
+                                 entry->getDoubleAttribute("minValue", 0.0));
+        m.maxValue         = static_cast<float>(
+                                 entry->getDoubleAttribute("maxValue", 1.0));
 
         // Only accept channel-specific entries here (globals come from loadGlobalMappings)
         if (m.channelIndex >= 0 && m.channelIndex < 6 && m.isValid())
@@ -557,13 +669,16 @@ void MidiLearnManager::saveGlobalMappings()
             continue;
 
         auto* entry = xml->createNewChildElement("Mapping");
-        entry->setAttribute("channelIndex",  m.channelIndex);
-        entry->setAttribute("target",        static_cast<int>(m.target));
-        entry->setAttribute("midiChannel",   m.midiChannel);
-        entry->setAttribute("ccNumber",      m.ccNumber);
-        entry->setAttribute("noteNumber",    m.noteNumber);
-        entry->setAttribute("minValue",      m.minValue);
-        entry->setAttribute("maxValue",      m.maxValue);
+        entry->setAttribute("channelIndex",    m.channelIndex);
+        entry->setAttribute("target",          static_cast<int>(m.target));
+        entry->setAttribute("midiChannel",     m.midiChannel);
+        entry->setAttribute("ccNumber",        m.ccNumber);
+        entry->setAttribute("noteNumber",      m.noteNumber);
+        entry->setAttribute("programNumber",   m.programNumber);
+        entry->setAttribute("rawStatusNibble", m.rawStatusNibble);
+        entry->setAttribute("rawData1",        m.rawData1);
+        entry->setAttribute("minValue",        m.minValue);
+        entry->setAttribute("maxValue",        m.maxValue);
     }
 
     xml->writeTo(file);
@@ -601,16 +716,19 @@ void MidiLearnManager::loadGlobalMappings()
     for (auto* entry : xml->getChildIterator())
     {
         MidiMapping m;
-        m.channelIndex  = entry->getIntAttribute("channelIndex",  -1);
-        m.target        = static_cast<MidiControlTarget>(
-                              entry->getIntAttribute("target", 0));
-        m.midiChannel   = entry->getIntAttribute("midiChannel",   0);
-        m.ccNumber      = entry->getIntAttribute("ccNumber",      -1);
-        m.noteNumber    = entry->getIntAttribute("noteNumber",    -1);
-        m.minValue      = static_cast<float>(
-                              entry->getDoubleAttribute("minValue", 0.0));
-        m.maxValue      = static_cast<float>(
-                              entry->getDoubleAttribute("maxValue", 1.0));
+        m.channelIndex     = entry->getIntAttribute("channelIndex",    -1);
+        m.target           = static_cast<MidiControlTarget>(
+                                 entry->getIntAttribute("target", 0));
+        m.midiChannel      = entry->getIntAttribute("midiChannel",     0);
+        m.ccNumber         = entry->getIntAttribute("ccNumber",        -1);
+        m.noteNumber       = entry->getIntAttribute("noteNumber",      -1);
+        m.programNumber    = entry->getIntAttribute("programNumber",   -1);
+        m.rawStatusNibble  = entry->getIntAttribute("rawStatusNibble", -1);
+        m.rawData1         = entry->getIntAttribute("rawData1",        -1);
+        m.minValue         = static_cast<float>(
+                                 entry->getDoubleAttribute("minValue", 0.0));
+        m.maxValue         = static_cast<float>(
+                                 entry->getDoubleAttribute("maxValue", 1.0));
 
         if (m.channelIndex == -1 && m.isValid())
             mappings[m.getKey()] = m;

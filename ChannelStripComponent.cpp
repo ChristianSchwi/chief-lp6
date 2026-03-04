@@ -46,7 +46,7 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
         auto* dlg = new RoutingComponent(audioEngine, channelIndex);
         juce::DialogWindow::LaunchOptions opts;
         opts.content.setOwned(dlg);
-        opts.dialogTitle           = "Routing — Ch " + juce::String(channelIndex + 1);
+        opts.dialogTitle           = "Routing Ch " + juce::String(channelIndex + 1);
         opts.dialogBackgroundColour= juce::Colours::darkgrey;
         opts.escapeKeyTriggersCloseButton = true;
         opts.useNativeTitleBar     = false;
@@ -230,11 +230,15 @@ void ChannelStripComponent::timerCallback()
             monitorModeBox.setSelectedId(id, juce::dontSendNotification);
     }
 
-    // State label — show MIDI LEARN if this channel is being assigned
+    // State label — show MIDI LEARN / UNLEARN feedback
     auto& mlm = audioEngine.getMidiLearnManager();
     if (mlm.isLearning() && mlm.getLearningTarget().channelIndex == channelIndex)
     {
         stateLabel.setText("MIDI LEARN", juce::dontSendNotification);
+    }
+    else if (mlm.isUnlearning())
+    {
+        stateLabel.setText("UNLEARN", juce::dontSendNotification);
     }
     else
     {
@@ -459,24 +463,54 @@ void ChannelStripComponent::monitorModeChanged()
 
 void ChannelStripComponent::showContextMenu(const juce::MouseEvent&)
 {
-    juce::PopupMenu menu;
-    menu.addItem(1, "MIDI Learn: Main Button");
-    menu.addItem(2, "MIDI Learn: Gain");
-    menu.addItem(3, "MIDI Learn: Mute");
-    menu.addItem(4, "MIDI Learn: Solo");
-    menu.addItem(5, "MIDI Learn: CLR");
+    static const MidiControlTarget chTargets[] = {
+        MidiControlTarget::MainButton,
+        MidiControlTarget::Gain,
+        MidiControlTarget::Mute,
+        MidiControlTarget::Solo,
+        MidiControlTarget::Clear
+    };
+    static const char* chLabels[] = { "Main Button", "Gain", "Mute", "Solo", "CLR" };
 
-    menu.showMenuAsync(juce::PopupMenu::Options(), [this](int id)
+    auto& mlm = audioEngine.getMidiLearnManager();
+    const bool wasUnlearning = mlm.isUnlearning();
+
+    juce::PopupMenu menu;
+    if (wasUnlearning)
     {
-        auto& mlm = audioEngine.getMidiLearnManager();
-        switch (id)
+        for (int i = 0; i < 5; ++i)
         {
-            case 1: mlm.startLearning(channelIndex, MidiControlTarget::MainButton); break;
-            case 2: mlm.startLearning(channelIndex, MidiControlTarget::Gain);       break;
-            case 3: mlm.startLearning(channelIndex, MidiControlTarget::Mute);       break;
-            case 4: mlm.startLearning(channelIndex, MidiControlTarget::Solo);       break;
-            case 5: mlm.startLearning(channelIndex, MidiControlTarget::Clear);      break;
-            default: break;
+            const bool hasMidi = mlm.getMapping(channelIndex, chTargets[i]).isValid();
+            menu.addItem(i + 1,
+                         juce::String("Remove MIDI: ") + chLabels[i],
+                         hasMidi);  // greyed if no mapping
+        }
+    }
+    else
+    {
+        for (int i = 0; i < 5; ++i)
+            menu.addItem(i + 1, juce::String("MIDI Learn: ") + chLabels[i]);
+    }
+
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this, wasUnlearning](int id)
+    {
+        if (id < 1 || id > 5) return;
+        static const MidiControlTarget chTargets[] = {
+            MidiControlTarget::MainButton,
+            MidiControlTarget::Gain,
+            MidiControlTarget::Mute,
+            MidiControlTarget::Solo,
+            MidiControlTarget::Clear
+        };
+        auto& mlm = audioEngine.getMidiLearnManager();
+        if (wasUnlearning)
+        {
+            mlm.removeMapping(channelIndex, chTargets[id - 1]);
+            mlm.stopUnlearning();
+        }
+        else
+        {
+            mlm.startLearning(channelIndex, chTargets[id - 1]);
         }
     });
 }

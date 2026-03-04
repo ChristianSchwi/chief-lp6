@@ -96,9 +96,12 @@ struct Song
     std::array<ChannelConfig, 6> channels;
     
     // Metronome settings
-    bool metronomeEnabled{false};
-    int metronomeOutputLeft{0};
-    int metronomeOutputRight{1};
+    bool  metronomeEnabled{false};
+    int   metronomeOutputLeft{0};
+    int   metronomeOutputRight{1};
+    int   metronomeBeatsPerBar{4};
+    float metronomeGain{1.0f};
+    int   fixedLengthBars{0};
     
     // File system
     juce::File songDirectory;                ///< Directory containing song files

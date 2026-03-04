@@ -22,9 +22,12 @@ juce::Result SongManager::saveSong(Song& song, AudioEngine& audioEngine)
     song.bpm                  = audioEngine.getLoopEngine().getBPM();
     song.beatsPerLoop         = audioEngine.getLoopEngine().getBeatsPerLoop();
     song.latchModeEnabled     = audioEngine.isLatchMode();
-    song.metronomeEnabled     = audioEngine.getMetronome().getEnabled();
-    song.metronomeOutputLeft  = audioEngine.getMetronome().getOutputLeft();
-    song.metronomeOutputRight = audioEngine.getMetronome().getOutputRight();
+    song.metronomeEnabled      = audioEngine.getMetronome().getEnabled();
+    song.metronomeOutputLeft   = audioEngine.getMetronome().getOutputLeft();
+    song.metronomeOutputRight  = audioEngine.getMetronome().getOutputRight();
+    song.metronomeBeatsPerBar  = audioEngine.getMetronome().getBeatsPerBar();
+    song.metronomeGain         = audioEngine.getMetronomeGain();
+    song.fixedLengthBars       = audioEngine.getFixedLengthBars();
 
     const juce::int64 loopLen = song.loopLengthSamples;
 
@@ -123,6 +126,9 @@ juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audio
     audioEngine.getMetronome().setBPM(song.bpm);
     audioEngine.getMetronome().setOutputChannels(song.metronomeOutputLeft,
                                                  song.metronomeOutputRight);
+    audioEngine.setBeatsPerBar(song.metronomeBeatsPerBar);
+    audioEngine.setMetronomeGain(song.metronomeGain);
+    audioEngine.setFixedLengthBars(song.fixedLengthBars);
 
     for (int i = 0; i < 6; ++i)
     {
@@ -370,9 +376,12 @@ juce::var SongManager::songToJSON(const Song& song)
     obj->setProperty("bpm",                   song.bpm);
     obj->setProperty("beats_per_loop",        song.beatsPerLoop);
     obj->setProperty("latch_mode_enabled",    song.latchModeEnabled);
-    obj->setProperty("metronome_enabled",     song.metronomeEnabled);
-    obj->setProperty("metronome_output_left", song.metronomeOutputLeft);
-    obj->setProperty("metronome_output_right",song.metronomeOutputRight);
+    obj->setProperty("metronome_enabled",       song.metronomeEnabled);
+    obj->setProperty("metronome_output_left",   song.metronomeOutputLeft);
+    obj->setProperty("metronome_output_right",  song.metronomeOutputRight);
+    obj->setProperty("metronome_beats_per_bar", song.metronomeBeatsPerBar);
+    obj->setProperty("metronome_gain",          song.metronomeGain);
+    obj->setProperty("fixed_length_bars",       song.fixedLengthBars);
 
     juce::Array<juce::var> chArr;
     for (const auto& ch : song.channels)
@@ -396,9 +405,16 @@ juce::Result SongManager::jsonToSong(const juce::var& json, Song& song)
     song.bpm               = obj->getProperty("bpm");
     song.beatsPerLoop      = obj->getProperty("beats_per_loop");
     song.latchModeEnabled     = obj->getProperty("latch_mode_enabled");
-    song.metronomeEnabled     = obj->getProperty("metronome_enabled");
-    song.metronomeOutputLeft  = obj->getProperty("metronome_output_left");
-    song.metronomeOutputRight = obj->getProperty("metronome_output_right");
+    song.metronomeEnabled      = obj->getProperty("metronome_enabled");
+    song.metronomeOutputLeft   = obj->getProperty("metronome_output_left");
+    song.metronomeOutputRight  = obj->getProperty("metronome_output_right");
+    song.metronomeBeatsPerBar  = obj->hasProperty("metronome_beats_per_bar")
+                                 ? (int)obj->getProperty("metronome_beats_per_bar") : 4;
+    song.metronomeGain         = obj->hasProperty("metronome_gain")
+                                 ? static_cast<float>(static_cast<double>(
+                                       obj->getProperty("metronome_gain"))) : 1.0f;
+    song.fixedLengthBars       = obj->hasProperty("fixed_length_bars")
+                                 ? (int)obj->getProperty("fixed_length_bars") : 0;
 
     auto* chArr = obj->getProperty("channels").getArray();
     if (chArr && chArr->size() >= 6)
@@ -542,4 +558,43 @@ juce::File SongManager::createSongDirectory(const juce::File& parentDirectory,
 bool SongManager::isValidSongDirectory(const juce::File& dir)
 {
     return dir.isDirectory() && dir.getChildFile("song.json").existsAsFile();
+}
+
+//==============================================================================
+// Current Song (auto-save / auto-restore)
+//==============================================================================
+
+juce::File SongManager::getCurrentSongDirectory()
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+               .getChildFile("chief")
+               .getChildFile("currentSong");
+}
+
+juce::Result SongManager::saveCurrentSong(AudioEngine& audioEngine)
+{
+    const auto dir = getCurrentSongDirectory();
+    if (!dir.createDirectory())
+        return juce::Result::fail("Cannot create currentSong directory: " +
+                                  dir.getFullPathName());
+
+    Song song;
+    song.songName      = "currentSong";
+    song.songDirectory = dir;
+
+    const auto result = saveSong(song, audioEngine);
+    if (result.wasOk())
+        DBG("Current song auto-saved to: " + dir.getFullPathName());
+    else
+        DBG("Current song auto-save FAILED: " + result.getErrorMessage());
+    return result;
+}
+
+juce::Result SongManager::loadCurrentSong(AudioEngine& audioEngine)
+{
+    const auto songFile = getCurrentSongDirectory().getChildFile("song.json");
+    Song song;
+    auto result = loadSong(songFile, song);
+    if (result.failed()) return result;
+    return applySongToEngine(song, audioEngine);
 }

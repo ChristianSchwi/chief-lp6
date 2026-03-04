@@ -60,17 +60,10 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     addAndMakeVisible(bpmSlider);
 
     //--------------------------------------------------------------------------
-    // Beats per loop
-    beatsLabel.setText("Loop:", juce::dontSendNotification);
-    beatsLabel.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(beatsLabel);
-
-    beatsSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    beatsSlider.setRange(1.0, 32.0, 1.0);
-    beatsSlider.setValue(audioEngine.getLoopEngine().getBeatsPerLoop(), juce::dontSendNotification);
-    beatsSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 55, 20);
-    beatsSlider.onValueChange = [this] { beatsChanged(); };
-    addAndMakeVisible(beatsSlider);
+    // Tap tempo
+    tapButton.setTooltip("Tap repeatedly to set BPM. Sequence resets after 3 s of silence.");
+    tapButton.onClick = [this] { tapClicked(); };
+    addAndMakeVisible(tapButton);
 
     //--------------------------------------------------------------------------
     // Latch Mode
@@ -120,6 +113,18 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     addAndMakeVisible(metroOutLabel);
     metroOutputBox.onChange = [this] { metroOutputChanged(); };
     addAndMakeVisible(metroOutputBox);
+
+    // Volume
+    metroGainLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(metroGainLabel);
+
+    metroGainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    metroGainSlider.setRange(0.0, 1.0, 0.01);
+    metroGainSlider.setValue(1.0, juce::dontSendNotification);
+    metroGainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 40, 20);
+    metroGainSlider.setTooltip("Metronome click volume (0 = silent, 1 = full).");
+    metroGainSlider.onValueChange = [this] { metroGainChanged(); };
+    addAndMakeVisible(metroGainSlider);
     // FIX: populateMetroOutputBox() wird NICHT hier aufgerufen —
     //      Audio ist zu diesem Zeitpunkt noch nicht initialisiert.
     //      Stattdessen: refreshAfterAudioInit() aus MainComponent aufrufen.
@@ -162,23 +167,34 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     addAndMakeVisible(countInBox);
 
     //--------------------------------------------------------------------------
+    // Fixed-Length Recording
+    fixedLenLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(fixedLenLabel);
+
+    fixedLenEditor.setInputRestrictions(4, "0123456789");
+    fixedLenEditor.setText("0", juce::dontSendNotification);
+    fixedLenEditor.setJustification(juce::Justification::centred);
+    fixedLenEditor.setTooltip("Auto-stop recording after this many bars (0 = off, metronome mode only).");
+    fixedLenEditor.onReturnKey  = [this] { applyFixedLenEditor(); };
+    fixedLenEditor.onFocusLost  = [this] { applyFixedLenEditor(); };
+    addAndMakeVisible(fixedLenEditor);
+
+    fixedLenBarsLabel.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(fixedLenBarsLabel);
+
+    fixedLenPlusBtn.setTooltip("Increase fixed length");
+    fixedLenPlusBtn.onClick = [this] { fixedLenStep(+1); };
+    addAndMakeVisible(fixedLenPlusBtn);
+
+    fixedLenMinusBtn.setTooltip("Decrease fixed length");
+    fixedLenMinusBtn.onClick = [this] { fixedLenStep(-1); };
+    addAndMakeVisible(fixedLenMinusBtn);
+
+    //--------------------------------------------------------------------------
     // Reset Song
     resetSongButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
     resetSongButton.onClick = [this] { resetSongClicked(); };
     addAndMakeVisible(resetSongButton);
-
-    //--------------------------------------------------------------------------
-    // Display labels
-    modeLabel      .setFont(juce::Font(14.0f, juce::Font::bold));
-    loopLengthLabel.setFont(juce::Font(14.0f));
-    playheadLabel  .setFont(juce::Font(14.0f));
-    cpuLabel       .setFont(juce::Font(14.0f));
-    cpuLabel       .setJustificationType(juce::Justification::centredRight);
-
-    addAndMakeVisible(modeLabel);
-    addAndMakeVisible(loopLengthLabel);
-    addAndMakeVisible(playheadLabel);
-    addAndMakeVisible(cpuLabel);
 
     updateMetronomeButtonStates();
     startTimer(50);  // 20 Hz
@@ -194,6 +210,11 @@ void TransportComponent::refreshAfterAudioInit()
 {
     // Jetzt kennt die AudioEngine die tatsächliche Ausgangskanal-Anzahl
     populateMetroOutputBox();
+    metroGainSlider.setValue(audioEngine.getMetronomeGain(), juce::dontSendNotification);
+
+    // Restore fixed-length editor from engine value
+    fixedLenEditor.setText(juce::String(audioEngine.getFixedLengthBars()),
+                           juce::dontSendNotification);
 }
 
 //==============================================================================
@@ -281,15 +302,17 @@ void TransportComponent::resized()
         bpmLabel .setBounds(row.removeFromLeft(55));
         bpmSlider.setBounds(row);
     }
-    {
-        auto row = area.removeFromTop(26);
-        beatsLabel .setBounds(row.removeFromLeft(55));
-        beatsSlider.setBounds(row);
-    }
+    tapButton.setBounds(area.removeFromTop(24));
+    area.removeFromTop(2);
     {
         auto row = area.removeFromTop(26);
         beatsPerBarLabel .setBounds(row.removeFromLeft(55));
         beatsPerBarSlider.setBounds(row);
+    }
+    {
+        auto row = area.removeFromTop(26);
+        metroGainLabel .setBounds(row.removeFromLeft(55));
+        metroGainSlider.setBounds(row);
     }
     {
         auto row = area.removeFromTop(26);
@@ -300,6 +323,14 @@ void TransportComponent::resized()
         auto row = area.removeFromTop(26);
         countInLabel.setBounds(row.removeFromLeft(72));
         countInBox  .setBounds(row);
+    }
+    {
+        auto row = area.removeFromTop(26);
+        fixedLenLabel    .setBounds(row.removeFromLeft(55));
+        fixedLenEditor   .setBounds(row.removeFromLeft(40).reduced(0, 3));
+        fixedLenBarsLabel.setBounds(row.removeFromLeft(30));
+        fixedLenPlusBtn  .setBounds(row.removeFromLeft(24).reduced(1, 3));
+        fixedLenMinusBtn .setBounds(row.removeFromLeft(24).reduced(1, 3));
     }
     area.removeFromTop(6);
 
@@ -326,13 +357,6 @@ void TransportComponent::resized()
         resetSongButton .setBounds(row                    .reduced(2, 3));
     }
     area.removeFromTop(6);
-
-    // ── STATUS ────────────────────────────────────────────────────────────────
-    addSection("STATUS");
-    modeLabel      .setBounds(area.removeFromTop(22));
-    loopLengthLabel.setBounds(area.removeFromTop(22));
-    playheadLabel  .setBounds(area.removeFromTop(22));
-    cpuLabel       .setBounds(area.removeFromTop(22));
 }
 
 //==============================================================================
@@ -347,16 +371,15 @@ void TransportComponent::timerCallback()
 
 void TransportComponent::updateDisplay()
 {
-    auto& le = audioEngine.getLoopEngine();
-
     // Play/Stop
     const bool playing = audioEngine.isPlaying();
     playStopButton.setButtonText(playing ? "Stop" : "Play");
     playStopButton.setColour(juce::TextButton::buttonColourId,
                              playing ? juce::Colours::red : juce::Colours::green);
 
-    bpmSlider        .setEnabled(!playing);
-    beatsSlider      .setEnabled(!playing);
+    const bool hasRec = audioEngine.hasAnyRecordings();
+    bpmSlider .setEnabled(!hasRec);
+    tapButton .setEnabled(!hasRec);
     beatsPerBarSlider.setEnabled(!playing);
 
     overdubButton  .setToggleState(audioEngine.isInOverdubMode(), juce::dontSendNotification);
@@ -366,34 +389,10 @@ void TransportComponent::updateDisplay()
     activeChannelLabel.setText("Active: Ch" + juce::String(audioEngine.getActiveChannel() + 1),
                                juce::dontSendNotification);
 
-    // Modus-Anzeige
-    const bool metroActive = audioEngine.getMetronome().getEnabled();
-    modeLabel.setText("Mode: " + juce::String(metroActive ? "Metronome" : "Free"),
-                      juce::dontSendNotification);
-    modeLabel.setColour(juce::Label::textColourId,
-                        metroActive ? juce::Colours::yellow : juce::Colours::lightblue);
-
-    // Loop-Länge
-    const juce::int64 loopLen = le.getLoopLength();
-    loopLengthLabel.setText(
-        loopLen > 0 ? "Loop: " + juce::String(le.getLoopLengthSeconds(), 2) + "s"
-                    : "Loop: ---",
-        juce::dontSendNotification);
-
-    // Playhead
-    playheadLabel.setText("Pos:  " + juce::String(le.getPlayheadSeconds(), 2) + "s",
-                          juce::dontSendNotification);
-
-    // CPU (farbkodiert)
-    const double cpu = audioEngine.getCPUUsage();
-    cpuLabel.setText("CPU: " + juce::String(cpu, 1) + "%", juce::dontSendNotification);
-    cpuLabel.setColour(juce::Label::textColourId,
-                       cpu > 80.0 ? juce::Colours::red    :
-                       cpu > 50.0 ? juce::Colours::orange :
-                                    juce::Colours::lightgreen);
-
-    // MIDI Learn visual feedback — blink "MIDI WAIT" while waiting for a CC/note
-    const bool learning = audioEngine.getMidiLearnManager().isLearning();
+    // MIDI button visual feedback — blink while learning or unlearning
+    auto& mlm = audioEngine.getMidiLearnManager();
+    const bool learning   = mlm.isLearning();
+    const bool unlearning = mlm.isUnlearning();
     if (learning)
     {
         const bool blinkOn = (juce::Time::getMillisecondCounter() / 500) % 2 == 0;
@@ -401,6 +400,14 @@ void TransportComponent::updateDisplay()
         midiLearnButton.setColour(juce::TextButton::buttonColourId,
                                   blinkOn ? juce::Colour(0xFF0066CC)
                                           : juce::Colour(0xFF004488));
+    }
+    else if (unlearning)
+    {
+        const bool blinkOn = (juce::Time::getMillisecondCounter() / 500) % 2 == 0;
+        midiLearnButton.setButtonText(blinkOn ? "UNLEARN" : "UNLRN...");
+        midiLearnButton.setColour(juce::TextButton::buttonColourId,
+                                  blinkOn ? juce::Colour(0xFFCC6600)
+                                          : juce::Colour(0xFF884400));
     }
     else
     {
@@ -432,6 +439,12 @@ void TransportComponent::updateMetronomeButtonStates()
     metronomeMuteButton.setEnabled(metroEnabled);
     metronomeMuteButton.setToggleState(audioEngine.getMetronome().getMuted(),
                                        juce::dontSendNotification);
+
+    // Fixed-length: only active when metronome is on and no recordings yet
+    const bool fixedLenActive = metroEnabled && !hasRecordings;
+    fixedLenEditor  .setEnabled(fixedLenActive);
+    fixedLenPlusBtn .setEnabled(fixedLenActive);
+    fixedLenMinusBtn.setEnabled(fixedLenActive);
 }
 
 //==============================================================================
@@ -456,12 +469,26 @@ void TransportComponent::bpmChanged()
     audioEngine.sendCommand(cmd);
 }
 
-void TransportComponent::beatsChanged()
+void TransportComponent::tapClicked()
 {
-    Command cmd;
-    cmd.type      = CommandType::SetBeatsPerLoop;
-    cmd.intValue1 = static_cast<int>(beatsSlider.getValue());
-    audioEngine.sendCommand(cmd);
+    const juce::int64 now = juce::Time::getMillisecondCounter();
+
+    if (!tapTimes.empty() && (now - tapTimes.back()) > 3000)
+        tapTimes.clear();
+
+    tapTimes.push_back(now);
+    if (tapTimes.size() < 2) return;
+
+    if (tapTimes.size() > 8)
+        tapTimes.erase(tapTimes.begin());
+
+    double totalMs = 0.0;
+    for (size_t i = 1; i < tapTimes.size(); ++i)
+        totalMs += static_cast<double>(tapTimes[i] - tapTimes[i - 1]);
+
+    const double avgMs  = totalMs / static_cast<double>(tapTimes.size() - 1);
+    const double newBpm = juce::jlimit(40.0, 240.0, 60000.0 / avgMs);
+    bpmSlider.setValue(newBpm, juce::sendNotification);
 }
 
 void TransportComponent::latchModeChanged()
@@ -503,6 +530,11 @@ void TransportComponent::metroOutputChanged()
     audioEngine.setMetronomeOutput(entry.left, entry.right);
 }
 
+void TransportComponent::metroGainChanged()
+{
+    audioEngine.setMetronomeGain(static_cast<float>(metroGainSlider.getValue()));
+}
+
 void TransportComponent::autoStartChanged()
 {
     audioEngine.setAutoStart(autoStartButton.getToggleState(),
@@ -524,6 +556,38 @@ void TransportComponent::countInChanged()
     const int bars  = barValues[id - 1];
     const int beats = bars * audioEngine.getBeatsPerBar();
     audioEngine.setCountInBeats(beats);
+}
+
+void TransportComponent::applyFixedLenEditor()
+{
+    const int val = juce::jlimit(0, 9999, fixedLenEditor.getText().getIntValue());
+    audioEngine.setFixedLengthBars(val);
+    fixedLenEditor.setText(juce::String(val), juce::dontSendNotification);
+}
+
+void TransportComponent::fixedLenStep(int direction)
+{
+    static const int steps[] = {0, 1, 2, 8, 16, 32, 64};
+    static const int nSteps  = (int)std::size(steps);
+
+    const int current = audioEngine.getFixedLengthBars();
+    int newVal = current;
+
+    if (direction > 0)
+    {
+        // First step strictly greater than current
+        for (int i = 0; i < nSteps; ++i)
+            if (steps[i] > current) { newVal = steps[i]; break; }
+    }
+    else
+    {
+        // Last step strictly less than current
+        for (int i = nSteps - 1; i >= 0; --i)
+            if (steps[i] < current) { newVal = steps[i]; break; }
+    }
+
+    audioEngine.setFixedLengthBars(newVal);
+    fixedLenEditor.setText(juce::String(newVal), juce::dontSendNotification);
 }
 
 void TransportComponent::resetSongClicked()
@@ -558,23 +622,92 @@ void TransportComponent::nextChannelClicked()
 
 void TransportComponent::showGlobalMidiLearnMenu()
 {
-    juce::PopupMenu menu;
-    menu.addItem(1, "MIDI Learn: Global Play/Stop");
-    menu.addItem(2, "MIDI Learn: Panic");
-    menu.addItem(3, "MIDI Learn: Metronome On/Off");
-    menu.addItem(4, "MIDI Learn: Overdub Mode On/Off");
-    menu.addItem(5, "MIDI Learn: Latch Mode On/Off");
-    menu.addItem(6, "MIDI Learn: Auto Start On/Off");
-    menu.addSeparator();
-    menu.addItem(7, "MIDI Learn: Next Channel");
-    menu.addItem(8, "MIDI Learn: Prev Channel");
-    menu.addItem(9, "MIDI Learn: Next Song");
-    menu.addItem(10, "MIDI Learn: Prev Song");
+    static const MidiControlTarget targets[] = {
+        MidiControlTarget::GlobalPlayStop,
+        MidiControlTarget::Panic,
+        MidiControlTarget::MetronomeToggle,
+        MidiControlTarget::GlobalOverdubToggle,
+        MidiControlTarget::LatchModeToggle,
+        MidiControlTarget::AutoStartToggle,
+        MidiControlTarget::NextChannel,
+        MidiControlTarget::PrevChannel,
+        MidiControlTarget::NextSong,
+        MidiControlTarget::PrevSong
+    };
+    static const char* labels[] = {
+        "Global Play/Stop",
+        "Panic",
+        "Metronome On/Off",
+        "Overdub Mode On/Off",
+        "Latch Mode On/Off",
+        "Auto Start On/Off",
+        "Next Channel",
+        "Prev Channel",
+        "Next Song",
+        "Prev Song"
+    };
+    static constexpr int numTargets = (int)std::size(targets);
 
-    menu.showMenuAsync(juce::PopupMenu::Options(), [this](int id)
+    auto& mlm = audioEngine.getMidiLearnManager();
+    const bool isLearn   = mlm.isLearning();
+    const bool isUnlearn = mlm.isUnlearning();
+
+    juce::PopupMenu menu;
+
+    if (isLearn)
+    {
+        menu.addItem(20, "Abort Learning");
+    }
+    else if (isUnlearn)
+    {
+        for (int i = 0; i < numTargets; ++i)
+        {
+            const bool hasMidi = mlm.getMapping(-1, targets[i]).isValid();
+            menu.addItem(i + 1,
+                         juce::String("Remove MIDI: ") + labels[i],
+                         hasMidi);  // greyed if no mapping
+            if (i == 5) menu.addSeparator();  // separator after AutoStart
+        }
+        menu.addSeparator();
+        menu.addItem(21, "Abort Unlearning");
+    }
+    else
+    {
+        for (int i = 0; i < numTargets; ++i)
+        {
+            menu.addItem(i + 1, juce::String("MIDI Learn: ") + labels[i]);
+            if (i == 5) menu.addSeparator();  // separator after AutoStart
+        }
+        menu.addSeparator();
+        menu.addItem(11, "Start MIDI Unlearn");
+        menu.addItem(12, "Remove ALL MIDI Mappings");
+    }
+
+    const bool wasUnlearning = isUnlearn;
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this, wasUnlearning](int id)
     {
         if (id <= 0) return;
-        const MidiControlTarget targets[] = {
+        auto& mlm = audioEngine.getMidiLearnManager();
+
+        if (id == 20) { mlm.stopLearning();    return; }
+        if (id == 21) { mlm.stopUnlearning();  return; }
+        if (id == 11) { mlm.startUnlearning(); return; }
+        if (id == 12)
+        {
+            auto options = juce::MessageBoxOptions()
+                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                .withTitle("Remove ALL MIDI Mappings")
+                .withMessage("This will delete every MIDI mapping (all channels and global controls). Continue?")
+                .withButton("Remove All")
+                .withButton("Cancel");
+            juce::AlertWindow::showAsync(options, [this](int result) {
+                if (result == 1)
+                    audioEngine.getMidiLearnManager().removeAllMappings();
+            });
+            return;
+        }
+
+        static const MidiControlTarget targets[] = {
             MidiControlTarget::GlobalPlayStop,
             MidiControlTarget::Panic,
             MidiControlTarget::MetronomeToggle,
@@ -586,8 +719,17 @@ void TransportComponent::showGlobalMidiLearnMenu()
             MidiControlTarget::NextSong,
             MidiControlTarget::PrevSong
         };
-        if (id >= 1 && id <= (int)std::size(targets))
-            audioEngine.getMidiLearnManager().startLearning(-1, targets[id - 1]);
+        if (id < 1 || id > (int)std::size(targets)) return;
+
+        if (wasUnlearning)
+        {
+            mlm.removeMapping(-1, targets[id - 1]);
+            mlm.stopUnlearning();
+        }
+        else
+        {
+            mlm.startLearning(-1, targets[id - 1]);
+        }
     });
 }
 

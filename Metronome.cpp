@@ -122,7 +122,8 @@ void Metronome::processBlock(float* const* outputChannelData,
             {
                 const float env = static_cast<float>(clickSampleCountdown) /
                                   static_cast<float>(clickDurationSamples);
-                const float out = s * currentClickAmplitude * env;
+                const float out = s * currentClickAmplitude * env
+                                    * masterGain.load(std::memory_order_relaxed);
                 if (hasL) outputChannelData[outL][i] += out;
                 if (hasR) outputChannelData[outR][i] += out;
             }

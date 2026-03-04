@@ -20,7 +20,8 @@
  */
 class MainComponent : public juce::Component,
                       public juce::ChangeListener,
-                      public juce::KeyListener
+                      public juce::KeyListener,
+                      private juce::Timer
 {
 public:
     MainComponent();
@@ -47,6 +48,7 @@ private:
     juce::Label      infoLabel;
     juce::TextButton audioSettingsButton  {"Audio Settings"};
     juce::TextButton preferencesButton;   // gear icon — opens PreferencesComponent
+    juce::TextButton helpButton           {"? Help"};
     juce::Image      logo;
     juce::Rectangle<int> logoArea;
 
@@ -55,6 +57,7 @@ private:
     //==========================================================================
     void initializeAudio();
     void updateInfoLabel();
+    void timerCallback() override;
 
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
 
@@ -62,6 +65,17 @@ private:
     bool keyPressed(const juce::KeyPress& key,
                     juce::Component* originatingComponent) override;
     void triggerChannel(int channelIndex);
+
+    // Preferences persistence
+    bool autoRecallLastSession {false};
+    void loadPreferences();
+    void savePreferences();
+    juce::File getPreferencesFile() const;
+
+    // Help dialogs
+    void showHelpMenu();
+    void showShortcutsDialog();
+    void showMidiMappingsDialog();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

@@ -147,6 +147,14 @@ public:
     void setCountInBeats(int beats);
     int  getCountInBeats() const { return countInBeats.load(std::memory_order_relaxed); }
 
+    //==========================================================================
+    // Fixed-Length Recording
+    //==========================================================================
+
+    /** Set number of bars for auto-stop recording (0 = disabled). */
+    void setFixedLengthBars(int bars);
+    int  getFixedLengthBars() const;
+
     /** True while a count-in countdown is running (safe to call from message thread). */
     bool isCountingIn()            const { return countInActive.load(std::memory_order_relaxed); }
     /** Channel index waiting to record after count-in (-1 if none). */
@@ -202,6 +210,10 @@ public:
     /** @brief Beats per bar — controls accent beat detection and bar-based count-in. */
     void setBeatsPerBar(int n);
     int  getBeatsPerBar() const;
+
+    /** @brief Master click volume (0 = silent, 1 = full). Thread-safe via atomic. */
+    void  setMetronomeGain(float gain);
+    float getMetronomeGain() const;
 
     //==========================================================================
     // Song Reset
@@ -266,6 +278,9 @@ private:
     std::atomic<bool>  isInitialised        {false};
     std::atomic<int>   activeChannelIndex   {0};
 
+    // Play/stop channel memory — bitmask of channels that were playing when stop was pressed
+    std::atomic<uint8_t> lastActiveChannels     {0};
+
     // Auto-start
     std::atomic<bool>  autoStartEnabled         {false};
     std::atomic<float> autoStartThresholdLinear {0.031623f};   // ~-30 dB
@@ -276,6 +291,19 @@ private:
     std::atomic<bool>  countInActive           {false};   // written audio thread, read UI thread
     juce::int64        countInSamplesRemaining {0};       // audio thread only
     std::atomic<int>   pendingRecordChannel    {-1};      // written audio thread, read UI thread
+
+    // Bar-end pending stop — metronome first-recording: record until bar boundary
+    std::atomic<bool>  pendingMetroBarEnd      {false};   // audio thread write, cleared there
+    std::atomic<int>   barEndPendingChannel    {-1};
+    juce::int64        barEndTargetSample      {0};       // audio thread only
+    juce::int64        barEndPlayheadOffset    {0};       // playhead start after bar-end stop
+    juce::int64        barEndSamplesRemaining  {0};       // countdown: samples until bar end fires
+
+    // Fixed-length recording
+    std::atomic<int>   fixedLengthBars         {0};    // 0 = disabled (message thread writes)
+    std::atomic<bool>  fixedLengthActive       {false}; // audio thread manages
+    std::atomic<int>   fixedLengthChannel      {-1};
+    juce::int64        fixedLengthSamplesRemaining {0}; // audio thread only
 
     // Working buffers (audio thread only)
     juce::AudioBuffer<float> inputBuffer;
