@@ -130,6 +130,9 @@ public:
 
     void emergencyStop();
 
+    /** Double the global loop length; recorded content is duplicated so it plays twice. */
+    void doubleLoopLength();
+
     //==========================================================================
     // Auto-Start (input threshold trigger)
     //==========================================================================
@@ -214,6 +217,20 @@ public:
     /** @brief Master click volume (0 = silent, 1 = full). Thread-safe via atomic. */
     void  setMetronomeGain(float gain);
     float getMetronomeGain() const;
+
+    /** @brief Master output volume (0 = silent, 1 = full). Thread-safe via atomic. */
+    void  setMasterGain(float gain);
+    float getMasterGain() const;
+
+    //==========================================================================
+    // Mute Groups (message thread only)
+    //==========================================================================
+
+    void setChannelMuteGroup(int channelIndex, int group);
+    int  getChannelMuteGroup(int channelIndex) const;
+    void toggleMuteGroup(int groupIndex);       // 0-3
+    bool isMuteGroupActive(int groupIndex) const;
+    void setMuteGroupActive(int groupIndex, bool active);
 
     //==========================================================================
     // Song Reset
@@ -305,6 +322,9 @@ private:
     std::atomic<int>   fixedLengthChannel      {-1};
     juce::int64        fixedLengthSamplesRemaining {0}; // audio thread only
 
+    // Master output volume
+    std::atomic<float> masterGain              {1.0f};
+
     // Working buffers (audio thread only)
     juce::AudioBuffer<float> inputBuffer;
     juce::AudioBuffer<float> outputBuffer;
@@ -315,6 +335,10 @@ private:
 
     // Channel display names (message thread only)
     std::array<juce::String, 6> channelNames;
+
+    // Mute groups (message thread only)
+    std::array<int, 6>  channelMuteGroup  {0, 0, 0, 0, 0, 0};   // 0=none, 1-4
+    std::array<bool, 4> muteGroupActive   {false, false, false, false};
 
     //==========================================================================
     // Command processing (audio thread)

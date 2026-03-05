@@ -36,8 +36,14 @@ enum class CommandType
     // Emergency
     EmergencyStop,
 
+    // Overdub undo
+    UndoOverdub,
+
     // Latch
-    CancelPending
+    CancelPending,
+
+    // Loop manipulation
+    DoubleLoopLength
 };
 
 //==============================================================================

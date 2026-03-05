@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
+#include <vector>
 #include "Command.h"
 
 //==============================================================================
@@ -14,7 +15,11 @@ class Channel
 {
 public:
     Channel(int channelIndex, ChannelType type);
-    virtual ~Channel() = default;
+    virtual ~Channel()
+    {
+        auto* staged = stagedOverdubBuffer.exchange(nullptr, std::memory_order_relaxed);
+        delete staged;
+    }
 
     //==========================================================================
     // Audio Thread
@@ -131,6 +136,28 @@ public:
      */
     bool loadLoopData(const juce::AudioBuffer<float>& source, juce::int64 numSamples);
 
+    //==========================================================================
+    // Overdub Layers
+    //==========================================================================
+
+    /** Pre-allocate a buffer for the next overdub pass (call on message thread). */
+    void stageOverdubBuffer(juce::int64 loopLength);
+
+    /** Remove the last overdub layer (or cancel active overdub). Audio thread. */
+    void undoLastOverdub();
+
+    int  getOverdubLayerCount() const { return static_cast<int>(overdubLayers.size()); }
+    bool canUndoOverdub()       const { return !overdubLayers.empty(); }
+
+    /** Append a pre-recorded overdub layer (message thread, audio stopped). */
+    bool loadOverdubLayer(const juce::AudioBuffer<float>& source, juce::int64 numSamples);
+
+    /** Read-only access to overdub layers for SongManager. */
+    const std::vector<juce::AudioBuffer<float>>& getOverdubLayers() const { return overdubLayers; }
+
+    /** Duplicate loop content: copy [0..len) to [len..2*len). Audio thread only. */
+    void doubleBuffer(juce::int64 currentLoopLength);
+
 protected:
     //==========================================================================
     int         channelIndex;
@@ -154,6 +181,10 @@ protected:
 
     juce::AudioBuffer<float> loopBuffer;
     juce::int64              loopBufferSize {0};
+
+    std::vector<juce::AudioBuffer<float>> overdubLayers;
+    int activeOverdubLayerIdx {-1};
+    std::atomic<juce::AudioBuffer<float>*> stagedOverdubBuffer {nullptr};
 
     juce::AudioBuffer<float> workingBuffer;
     juce::AudioBuffer<float> fxBuffer;
@@ -186,6 +217,16 @@ protected:
     void playFromLoop(juce::AudioBuffer<float>& dest,
                       juce::int64 startPosition,
                       int numSamples);
+
+    /** Read from a loop buffer with wrap-around. addToDest=false uses copyFrom, true uses addFrom. */
+    void readBufferWrapped(const juce::AudioBuffer<float>& src, juce::int64 bufSize,
+                           juce::AudioBuffer<float>& dest, juce::int64 startPos,
+                           int numSamples, bool addToDest);
+
+    /** Write to a loop buffer with wrap-around. addToBuffer=false uses copyFrom, true uses addFrom. */
+    void writeBufferWrapped(juce::AudioBuffer<float>& dst, juce::int64 bufSize,
+                            const juce::AudioBuffer<float>& src, juce::int64 startPos,
+                            int numSamples, bool addToBuffer);
 
     bool shouldMonitor() const;
 

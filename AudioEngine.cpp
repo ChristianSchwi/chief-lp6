@@ -426,6 +426,17 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
                             playheadPos,
                             playing);
 
+    //--- 7. MASTER GAIN -------------------------------------------------------
+    {
+        const float mg = masterGain.load(std::memory_order_relaxed);
+        if (mg != 1.0f)
+        {
+            for (int ch = 0; ch < numOutputChannels; ++ch)
+                if (outputChannelData[ch])
+                    juce::FloatVectorOperations::multiply(outputChannelData[ch], mg, numSamples);
+        }
+    }
+
     //--- DIAGNOSTICS -----------------------------------------------------------
     totalSamplesProcessed.fetch_add(numSamples, std::memory_order_relaxed);
 }
@@ -556,6 +567,20 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
             break;
         }
 
+        case CommandType::DoubleLoopLength:
+        {
+            const juce::int64 loopLen = loopEngine->getLoopLength();
+            if (loopLen <= 0) break;
+
+            // Duplicate audio in every channel's buffer
+            for (auto& ch : channels)
+                if (ch) ch->doubleBuffer(loopLen);
+
+            loopEngine->setLoopLength(loopLen * 2);
+            DBG("Loop doubled: " + juce::String(loopLen) + " -> " + juce::String(loopLen * 2));
+            break;
+        }
+
         default:
             DBG("Unknown global command: " + juce::String(static_cast<int>(cmd.type)));
             break;
@@ -600,7 +625,7 @@ void AudioEngine::processChannelCommand(const Command& cmd)
             else
             {
                 const int ci = countInBeats.load(std::memory_order_relaxed);
-                if (ci > 0 && !countInActive)
+                if (ci > 0 && !countInActive && !wasPlaying)
                 {
                     // Count-in phase: transport runs, recording deferred
                     const double bpm = loopEngine->getBPM();
@@ -889,6 +914,10 @@ void AudioEngine::processChannelCommand(const Command& cmd)
             channel->clearPendingActions();
             break;
 
+        case CommandType::UndoOverdub:
+            channel->undoLastOverdub();
+            break;
+
         default:
             DBG("Unknown channel command: " + juce::String(static_cast<int>(cmd.type)));
             break;
@@ -901,6 +930,14 @@ void AudioEngine::processChannelCommand(const Command& cmd)
 
 bool AudioEngine::sendCommand(const Command& cmd)
 {
+    // Pre-allocate overdub buffer on message thread before queuing
+    if (cmd.type == CommandType::StartOverdub)
+    {
+        auto* ch = getChannel(cmd.channelIndex);
+        if (ch)
+            ch->stageOverdubBuffer(loopEngine->getLoopLength());
+    }
+
     if (!commandQueue.pushCommand(cmd))
     {
         DBG("WARNING: Command queue full — command dropped.");
@@ -936,28 +973,10 @@ void AudioEngine::setPlaying(bool shouldPlay)
 
     if (shouldPlay)
     {
-        uint8_t mask = lastActiveChannels.load(std::memory_order_acquire);
-
-        // Validate: remove channels that no longer have recordings
-        uint8_t validMask = 0;
+        // Start all channels that have recordings
         for (int i = 0; i < 6; ++i)
-            if ((mask & (1u << i)) && channels[i] && channels[i]->hasLoop())
-                validMask |= static_cast<uint8_t>(1u << i);
-
-        if (validMask != 0)
-        {
-            // Restart the channels that were playing before stop
-            for (int i = 0; i < 6; ++i)
-                if (validMask & (1u << i))
-                    sendCommand(Command::startPlayback(i));
-        }
-        else if (hasAnyRecordings())
-        {
-            // No previous active channels — start all channels with recordings
-            for (int i = 0; i < 6; ++i)
-                if (channels[i] && channels[i]->hasLoop())
-                    sendCommand(Command::startPlayback(i));
-        }
+            if (channels[i] && channels[i]->hasLoop())
+                sendCommand(Command::startPlayback(i));
     }
 }
 
@@ -972,6 +991,13 @@ void AudioEngine::setOverdubMode(bool enabled)
 void AudioEngine::emergencyStop()
 {
     sendCommand(Command::emergencyStop());
+}
+
+void AudioEngine::doubleLoopLength()
+{
+    Command cmd;
+    cmd.type = CommandType::DoubleLoopLength;
+    sendCommand(cmd);
 }
 
 //==============================================================================
@@ -1226,6 +1252,9 @@ int AudioEngine::getBeatsPerBar() const
 void AudioEngine::setMetronomeGain(float gain) { metronome->setMasterGain(gain); }
 float AudioEngine::getMetronomeGain() const    { return metronome->getMasterGain(); }
 
+void AudioEngine::setMasterGain(float gain)    { masterGain.store(juce::jlimit(0.0f, 1.0f, gain), std::memory_order_release); }
+float AudioEngine::getMasterGain() const       { return masterGain.load(std::memory_order_relaxed); }
+
 //==============================================================================
 // Song Reset (Message Thread)
 //==============================================================================
@@ -1240,7 +1269,67 @@ bool AudioEngine::hasAnyRecordings() const
 
 void AudioEngine::resetSong()
 {
+    // Clear mute groups
+    channelMuteGroup.fill(0);
+    muteGroupActive.fill(false);
+
     sendCommand(Command::resetSong());
+}
+
+//==============================================================================
+// Mute Groups (Message Thread)
+//==============================================================================
+
+void AudioEngine::setChannelMuteGroup(int channelIndex, int group)
+{
+    if (channelIndex < 0 || channelIndex >= 6) return;
+    if (group < 0 || group > 4) return;
+
+    const int oldGroup = channelMuteGroup[channelIndex];
+    channelMuteGroup[channelIndex] = group;
+
+    // If leaving an active group, unmute. If joining an active group, mute.
+    auto* ch = getChannel(channelIndex);
+    if (!ch) return;
+
+    if (oldGroup >= 1 && oldGroup <= 4 && muteGroupActive[oldGroup - 1])
+        ch->setMuted(false);
+    if (group >= 1 && group <= 4 && muteGroupActive[group - 1])
+        ch->setMuted(true);
+}
+
+int AudioEngine::getChannelMuteGroup(int channelIndex) const
+{
+    if (channelIndex < 0 || channelIndex >= 6) return 0;
+    return channelMuteGroup[channelIndex];
+}
+
+void AudioEngine::toggleMuteGroup(int groupIndex)
+{
+    if (groupIndex < 0 || groupIndex >= 4) return;
+    setMuteGroupActive(groupIndex, !muteGroupActive[groupIndex]);
+}
+
+bool AudioEngine::isMuteGroupActive(int groupIndex) const
+{
+    if (groupIndex < 0 || groupIndex >= 4) return false;
+    return muteGroupActive[groupIndex];
+}
+
+void AudioEngine::setMuteGroupActive(int groupIndex, bool active)
+{
+    if (groupIndex < 0 || groupIndex >= 4) return;
+    muteGroupActive[groupIndex] = active;
+
+    const int group = groupIndex + 1;  // 1-based
+    for (int i = 0; i < 6; ++i)
+    {
+        if (channelMuteGroup[i] == group)
+        {
+            auto* ch = getChannel(i);
+            if (ch) ch->setMuted(active);
+        }
+    }
 }
 
 //==============================================================================

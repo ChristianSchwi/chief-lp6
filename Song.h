@@ -57,6 +57,7 @@ struct ChannelConfig
     MonitorMode monitorMode{MonitorMode::WhenTrackActive};  // matches Channel default
     bool muted{false};
     bool solo{false};
+    int  muteGroup{0};   ///< 0=none, 1-4
     
     // VSTi instrument (only for VSTi channels)
     PluginData vstInstrument;
@@ -67,6 +68,7 @@ struct ChannelConfig
     // Loop file reference
     juce::String loopFileName;              ///< e.g. "channel_0.loop"
     bool hasLoopData{false};
+    int  overdubLayerCount{0};              ///< number of overdub layers saved
     
     ChannelConfig() = default;
 };
@@ -102,6 +104,7 @@ struct Song
     int   metronomeBeatsPerBar{4};
     float metronomeGain{1.0f};
     int   fixedLengthBars{0};
+    float masterGain{1.0f};
     
     // File system
     juce::File songDirectory;                ///< Directory containing song files
@@ -126,6 +129,16 @@ struct Song
     juce::File getLoopFile(int channelIndex) const
     {
         return songDirectory.getChildFile("channel_" + juce::String(channelIndex) + ".loop");
+    }
+
+    /**
+     * @brief Get overdub layer file for a channel
+     */
+    juce::File getOverdubLayerFile(int channelIndex, int layerIndex) const
+    {
+        return songDirectory.getChildFile(
+            "channel_" + juce::String(channelIndex) +
+            "_ovd_" + juce::String(layerIndex) + ".loop");
     }
     
     /**

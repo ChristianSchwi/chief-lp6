@@ -5,6 +5,7 @@
 #include "SongManager.h"
 #include "ShowManager.h"
 #include "Song.h"
+#include "ContextMenuControls.h"
 
 /**
  * @file ShowComponent.h
@@ -30,6 +31,7 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void mouseDown(const juce::MouseEvent& e) override;
 
     /** Called from MainComponent after audio init to enable full song load. */
     void setAudioReady(bool ready) { audioIsReady = ready; }
@@ -54,8 +56,8 @@ private:
     juce::Label      showNameLabel;
 
     // Song navigation
-    juce::TextButton prevSongButton {"<"};
-    juce::TextButton nextSongButton {">"};
+    ContextMenuButton prevSongButton {"<"};
+    ContextMenuButton nextSongButton {">"};
     juce::Label      songPositionLabel;  // "Song 2/5: My Song"
 
     // Individual song controls
@@ -74,6 +76,7 @@ private:
     void saveShowClicked();
     void prevSongClicked();
     void nextSongClicked();
+    void showMidiContextMenu(MidiControlTarget target);
     void loadSongClicked();
     void saveSongClicked();
     void addToShowClicked();

@@ -329,6 +329,17 @@ bool MainComponent::keyPressed(const juce::KeyPress& key, juce::Component*)
         return true;
     }
 
+    // U — undo last overdub on active channel
+    if (code == 'u' || code == 'U')
+    {
+        const int ch = audioEngine.getActiveChannel();
+        Command cmd;
+        cmd.type         = CommandType::UndoOverdub;
+        cmd.channelIndex = ch;
+        audioEngine.sendCommand(cmd);
+        return true;
+    }
+
     return false;
 }
 
@@ -427,6 +438,7 @@ void MainComponent::showShortcutsDialog()
         "L              Toggle Latch Mode\n"
         "M              Toggle Mute on active channel\n"
         "C              Clear active channel loop\n"
+        "U              Undo last overdub on active channel\n"
         "<- / ->        Previous / Next channel";
 
     juce::AlertWindow::showMessageBoxAsync(

@@ -28,6 +28,7 @@ juce::Result SongManager::saveSong(Song& song, AudioEngine& audioEngine)
     song.metronomeBeatsPerBar  = audioEngine.getMetronome().getBeatsPerBar();
     song.metronomeGain         = audioEngine.getMetronomeGain();
     song.fixedLengthBars       = audioEngine.getFixedLengthBars();
+    song.masterGain            = audioEngine.getMasterGain();
 
     const juce::int64 loopLen = song.loopLengthSamples;
 
@@ -58,12 +59,30 @@ juce::Result SongManager::saveSong(Song& song, AudioEngine& audioEngine)
                 song.channels[i].hasLoopData  = true;
                 song.channels[i].loopFileName = loopFile.getFileName();
             }
+
+            // Save overdub layers
+            const auto& layers = channel->getOverdubLayers();
+            song.channels[i].overdubLayerCount = static_cast<int>(layers.size());
+            for (int layer = 0; layer < static_cast<int>(layers.size()); ++layer)
+            {
+                auto layerFile = song.getOverdubLayerFile(i, layer);
+                auto layerResult = saveLoopFile(layerFile, layers[layer],
+                                                layers[layer].getNumSamples());
+                if (layerResult.failed())
+                {
+                    DBG("WARNING: overdub layer save failed for ch " + juce::String(i) +
+                        " layer " + juce::String(layer));
+                    song.channels[i].overdubLayerCount = layer;  // truncate
+                    break;
+                }
+            }
         }
         else
         {
             // No loop or loop length unknown — ensure JSON doesn't reference a missing file
             song.channels[i].hasLoopData  = false;
             song.channels[i].loopFileName = {};
+            song.channels[i].overdubLayerCount = 0;
         }
     }
 
@@ -129,6 +148,7 @@ juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audio
     audioEngine.setBeatsPerBar(song.metronomeBeatsPerBar);
     audioEngine.setMetronomeGain(song.metronomeGain);
     audioEngine.setFixedLengthBars(song.fixedLengthBars);
+    audioEngine.setMasterGain(song.masterGain);
 
     for (int i = 0; i < 6; ++i)
     {
@@ -141,6 +161,7 @@ juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audio
         if (!channel) continue;
 
         audioEngine.setChannelName(i, cfg.channelName);
+        audioEngine.setChannelMuteGroup(i, cfg.muteGroup);
         channel->setGainDb    (cfg.gainDb);
         channel->setMonitorMode(cfg.monitorMode);
         channel->setMuted      (cfg.muted);
@@ -185,6 +206,33 @@ juce::Result SongManager::applySongToEngine(const Song& song, AudioEngine& audio
             else
             {
                 DBG("WARNING: loop file missing: " + loopFile.getFullPathName());
+            }
+        }
+
+        // --- Overdub layers ---
+        for (int layer = 0; layer < cfg.overdubLayerCount; ++layer)
+        {
+            auto layerFile = song.getOverdubLayerFile(i, layer);
+            if (layerFile.existsAsFile())
+            {
+                const juce::int64 maxSamples = juce::jmax(song.loopLengthSamples,
+                                                           channel->getLoopBufferSize());
+                juce::AudioBuffer<float> tmp(2, static_cast<int>(maxSamples));
+                tmp.clear();
+                const juce::int64 loaded = loadLoopFile(layerFile, tmp, maxSamples);
+                if (loaded > 0)
+                {
+                    if (!channel->loadOverdubLayer(tmp, loaded))
+                        DBG("WARNING: ch " + juce::String(i) +
+                            " loadOverdubLayer " + juce::String(layer) + " failed");
+                    else
+                        DBG("  ch " + juce::String(i) + " overdub layer " +
+                            juce::String(layer) + ": " + juce::String(loaded) + " samples");
+                }
+            }
+            else
+            {
+                DBG("WARNING: overdub layer file missing: " + layerFile.getFullPathName());
             }
         }
 
@@ -309,6 +357,7 @@ ChannelConfig SongManager::readChannelState(Channel* channel,
     cfg.monitorMode = channel->getMonitorMode();
     cfg.muted       = channel->isMuted();
     cfg.solo        = channel->isSolo();
+    cfg.muteGroup   = audioEngine.getChannelMuteGroup(channelIndex);
     cfg.routing     = channel->getRouting();
     cfg.hasLoopData = channel->hasLoop();
 
@@ -382,6 +431,7 @@ juce::var SongManager::songToJSON(const Song& song)
     obj->setProperty("metronome_beats_per_bar", song.metronomeBeatsPerBar);
     obj->setProperty("metronome_gain",          song.metronomeGain);
     obj->setProperty("fixed_length_bars",       song.fixedLengthBars);
+    obj->setProperty("master_gain",             song.masterGain);
 
     juce::Array<juce::var> chArr;
     for (const auto& ch : song.channels)
@@ -415,6 +465,9 @@ juce::Result SongManager::jsonToSong(const juce::var& json, Song& song)
                                        obj->getProperty("metronome_gain"))) : 1.0f;
     song.fixedLengthBars       = obj->hasProperty("fixed_length_bars")
                                  ? (int)obj->getProperty("fixed_length_bars") : 0;
+    song.masterGain            = obj->hasProperty("master_gain")
+                                 ? static_cast<float>(static_cast<double>(
+                                       obj->getProperty("master_gain"))) : 1.0f;
 
     auto* chArr = obj->getProperty("channels").getArray();
     if (chArr && chArr->size() >= 6)
@@ -434,9 +487,11 @@ juce::var SongManager::channelToJSON(const ChannelConfig& ch)
     obj->setProperty("monitor_mode", static_cast<int>(ch.monitorMode));
     obj->setProperty("muted",        ch.muted);
     obj->setProperty("solo",         ch.solo);
+    obj->setProperty("mute_group",   ch.muteGroup);
     obj->setProperty("routing",      routingToJSON(ch.routing));
     obj->setProperty("has_loop_data",ch.hasLoopData);
     obj->setProperty("loop_file_name",ch.loopFileName);
+    obj->setProperty("overdub_layer_count", ch.overdubLayerCount);
 
     if (ch.type == ChannelType::VSTi && !ch.vstInstrument.identifier.isEmpty())
         obj->setProperty("vsti", pluginToJSON(ch.vstInstrument));
@@ -463,9 +518,13 @@ juce::Result SongManager::jsonToChannel(const juce::var& json, ChannelConfig& ch
     ch.monitorMode = static_cast<MonitorMode>((int)obj->getProperty("monitor_mode"));
     ch.muted       = obj->getProperty("muted");
     ch.solo        = obj->getProperty("solo");
+    ch.muteGroup   = obj->hasProperty("mute_group")
+                     ? static_cast<int>(obj->getProperty("mute_group")) : 0;
     jsonToRouting(obj->getProperty("routing"), ch.routing);
     ch.hasLoopData  = obj->getProperty("has_loop_data");
     ch.loopFileName = obj->getProperty("loop_file_name").toString();
+    ch.overdubLayerCount = obj->hasProperty("overdub_layer_count")
+                           ? static_cast<int>(obj->getProperty("overdub_layer_count")) : 0;
 
     if (obj->hasProperty("vsti"))
         jsonToPlugin(obj->getProperty("vsti"), ch.vstInstrument);

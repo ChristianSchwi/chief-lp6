@@ -2,33 +2,7 @@
 
 #include <JuceHeader.h>
 #include "AudioEngine.h"
-
-/**
- * @brief TextButton that forwards right-clicks to its parent component.
- *
- * Without this, JUCE TextButton fires onClick on both left AND right mouse
- * button release, so right-clicking the main REC/PLAY button would start
- * recording instead of showing the context menu.
- */
-struct ContextMenuButton : public juce::TextButton
-{
-    using juce::TextButton::TextButton;
-
-    void mouseDown(const juce::MouseEvent& e) override
-    {
-        if (e.mods.isRightButtonDown())
-        {
-            // Forward to parent so it can show the context menu.
-            // Do NOT call TextButton::mouseDown — that would arm the button.
-            if (auto* p = getParentComponent())
-                p->mouseDown(e.getEventRelativeTo(p));
-            return;
-        }
-        juce::TextButton::mouseDown(e);
-    }
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ContextMenuButton)
-};
+#include "ContextMenuControls.h"
 
 //==============================================================================
 /**
@@ -66,12 +40,16 @@ private:
     ContextMenuButton clrButton   {"CLR"};
     ContextMenuButton ioButton    {"I/O"};
     ContextMenuButton fxButton    {"FX"};
+    ContextMenuButton undoButton  {"UNDO"};
 
     // Controls
-    juce::Slider      gainSlider;
+    ContextMenuSlider gainSlider;
     ContextMenuButton muteButton  {"M"};
     ContextMenuButton soloButton  {"S"};
     juce::ComboBox   monitorModeBox;
+
+    // Mute group assignment buttons
+    std::array<juce::TextButton, 4> muteGroupButtons;
 
     // Display
     juce::Label      channelLabel;
@@ -83,12 +61,13 @@ private:
 
     void mainButtonClicked();
     void clrButtonClicked();
+    void undoClicked();
     void muteClicked();
     void soloClicked();
     void gainChanged();
 
     void monitorModeChanged();
-    void showContextMenu(const juce::MouseEvent& e);
+    void showMidiContextMenu(MidiControlTarget target);
 
     bool isActiveChannel()  const { return audioEngine.getActiveChannel() == channelIndex; }
     bool channel_hasLoop()  const;  // helper — avoids repeated null-check

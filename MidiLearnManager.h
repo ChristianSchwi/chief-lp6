@@ -58,7 +58,14 @@ enum class MidiControlTarget
     MetronomeToggle,     // toggle metronome on/off (global)
     GlobalOverdubToggle, // toggle global overdub mode (global)
     LatchModeToggle,     // toggle latch mode (global)
-    AutoStartToggle      // toggle auto-start (global)
+    AutoStartToggle,     // toggle auto-start (global)
+    MuteGroupToggle1,    // toggle mute group 1 (global)
+    MuteGroupToggle2,    // toggle mute group 2 (global)
+    MuteGroupToggle3,    // toggle mute group 3 (global)
+    MuteGroupToggle4,    // toggle mute group 4 (global)
+    TapTempo,            // tap tempo (global)
+    MasterGain,          // master output volume (global, continuous)
+    DoubleLoopLength     // double loop length (global, trigger)
 };
 
 //==============================================================================
@@ -172,6 +179,7 @@ public:
     /** Callbacks for global song navigation (set by ShowComponent) */
     std::function<void()> onNextSong;
     std::function<void()> onPrevSong;
+    std::function<void()> onTapTempo;
 
     //==========================================================================
     // MIDI-Eingabe (vom Audio/MIDI-Thread aufgerufen — thread-safe)
@@ -228,6 +236,10 @@ private:
     // Last processed MIDI message (message thread only — no lock needed)
     juce::MidiMessage lastProcessedMidi;
     bool              lastMidiReceived {false};
+
+    // Double-press detection for MainButton → UndoOverdub (message thread only)
+    std::map<juce::String, double> lastMainButtonTriggerTime;
+    static constexpr double doublePressWindowMs = 400.0;
 
     // Lock-free Queue für MIDI-Messages aus dem Audio-Thread
     juce::AbstractFifo fifo{256};

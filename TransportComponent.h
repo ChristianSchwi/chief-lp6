@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "ContextMenuControls.h"
 
 /**
  * @file TransportComponent.h
@@ -26,6 +27,7 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void mouseDown(const juce::MouseEvent& e) override;
 
     /**
      * @brief Nach AudioEngine::initialiseAudio() aufrufen.
@@ -42,28 +44,32 @@ private:
 
     //==========================================================================
     // Transport
-    juce::TextButton   playStopButton    {"Play"};
-    juce::TextButton   panicButton       {"PANIC"};
-    juce::ToggleButton overdubButton     {"Overdub Mode"};
+    ContextMenuButton       playStopButton    {"Play"};
+    ContextMenuButton       panicButton       {"PANIC"};
+    ContextMenuToggleButton overdubButton     {"Overdub Mode"};
+
+    // Master volume
+    juce::Label  masterGainLabel {"", "Master:"};
+    juce::Slider masterGainSlider;
 
     // Channel navigation
-    juce::TextButton   prevChannelButton {"<"};
-    juce::TextButton   nextChannelButton {">"};
-    juce::Label        activeChannelLabel{"", "Active: Ch1"};
+    ContextMenuButton       prevChannelButton {"<"};
+    ContextMenuButton       nextChannelButton {">"};
+    juce::Label             activeChannelLabel{"", "Active: Ch1"};
 
     // Global MIDI learn
-    juce::TextButton   midiLearnButton   {"MIDI"};
+    juce::TextButton        midiLearnButton   {"MIDI"};
 
     // Loop settings
     juce::Label        bpmLabel   {"", "BPM:"};
-    juce::Slider       bpmSlider;
-    juce::TextButton   tapButton  {"Tap"};
-    juce::ToggleButton latchModeButton{"Latch Mode"};
+    juce::TextEditor   bpmEditor;
+    ContextMenuButton  tapButton  {"Tap"};
+    ContextMenuToggleButton latchModeButton{"Latch Mode"};
 
     //==========================================================================
     // Metronome
-    juce::ToggleButton metronomeButton    {"Metronome"};
-    juce::ToggleButton metronomeMuteButton{"Mute Click"};
+    ContextMenuToggleButton metronomeButton{"On/Off"};
+    juce::ToggleButton metronomeMuteButton{"Mute"};
     juce::Label        beatsPerBarLabel   {"", "Beats:"};
     juce::Slider       beatsPerBarSlider;
     juce::Label        metroOutLabel      {"", "Metro Out:"};
@@ -73,7 +79,7 @@ private:
 
     //==========================================================================
     // Auto-Start
-    juce::ToggleButton autoStartButton     {"Auto Start"};
+    ContextMenuToggleButton autoStartButton{"Auto Start"};
     juce::Label        autoStartThreshLabel{"", "Threshold:"};
     juce::Slider       autoStartSlider;
 
@@ -91,8 +97,15 @@ private:
     juce::TextButton fixedLenMinusBtn {"-"};
 
     //==========================================================================
+    // Loop manipulation
+    ContextMenuButton doubleLoopButton{"Double Loop"};
+
     // Reset Song
     juce::TextButton resetSongButton{"Reset Song"};
+
+    //==========================================================================
+    // Mute Groups
+    std::array<ContextMenuButton, 4> muteGroupToggleButtons;
 
     //==========================================================================
     bool lastHasRecordings { false };
@@ -109,7 +122,8 @@ private:
     void overdubModeChanged();
     void prevChannelClicked();
     void nextChannelClicked();
-    void showGlobalMidiLearnMenu();
+    void showMidiContextMenu(MidiControlTarget target);
+    void showMidiButtonMenu();
     void bpmChanged();
     void tapClicked();
     void latchModeChanged();
@@ -125,6 +139,7 @@ private:
     void fixedLenStep(int direction);
     void resetSongClicked();
     void populateMetroOutputBox();
+    void masterGainChanged();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportComponent)
 };

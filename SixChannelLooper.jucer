@@ -22,6 +22,8 @@
             file="ChannelStripComponent.h"/>
       <FILE id="ftQWtP" name="chief_lp6_logo.png" compile="0" resource="1"
             file="chief_lp6_logo.png"/>
+      <FILE id="FCtxMenu" name="ContextMenuControls.h" compile="0" resource="0"
+            file="ContextMenuControls.h"/>
       <FILE id="F13Comm" name="Command.h" compile="0" resource="0" file="Command.h"/>
       <FILE id="F6Loop" name="LoopEngine.cpp" compile="1" resource="0" file="LoopEngine.cpp"/>
       <FILE id="F6LoopH" name="LoopEngine.h" compile="0" resource="0" file="LoopEngine.h"/>

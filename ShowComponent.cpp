@@ -234,6 +234,38 @@ void ShowComponent::nextSongClicked()
     loadAndApplySong(next);
 }
 
+void ShowComponent::mouseDown(const juce::MouseEvent& e)
+{
+    if (!e.mods.isRightButtonDown())
+        return;
+
+    auto pos = e.getPosition();
+    auto hit = [&](juce::Component& c) { return c.getBounds().contains(pos); };
+
+    if      (hit(prevSongButton)) showMidiContextMenu(MidiControlTarget::PrevSong);
+    else if (hit(nextSongButton)) showMidiContextMenu(MidiControlTarget::NextSong);
+}
+
+void ShowComponent::showMidiContextMenu(MidiControlTarget target)
+{
+    auto& mlm = audioEngine.getMidiLearnManager();
+    const bool hasMapping = mlm.getMapping(-1, target).isValid();
+    const auto name = MidiLearnManager::targetName(target);
+
+    juce::PopupMenu menu;
+    menu.addItem(1, "MIDI Learn: " + name);
+    menu.addItem(2, "Remove MIDI: " + name, hasMapping);
+
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this, target](int id)
+    {
+        auto& mlm = audioEngine.getMidiLearnManager();
+        if (id == 1)
+            mlm.startLearning(-1, target);
+        else if (id == 2)
+            mlm.removeMapping(-1, target);
+    });
+}
+
 bool ShowComponent::loadAndApplySong(int showSongIndex)
 {
     if (!showLoaded || showSongIndex < 0 ||

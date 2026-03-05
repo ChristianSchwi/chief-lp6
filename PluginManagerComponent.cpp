@@ -254,16 +254,7 @@ PluginManagerComponent::PluginManagerComponent(AudioEngine& engine, int channelI
     addAndMakeVisible(vstiTypeButton);
 
     // Scan-Button — always visible so the user can rescan after installing new plugins
-    scanButton.onClick = [this]
-    {
-        scanButton.setEnabled(false);
-        scanButton.setButtonText("Scanning...");
-        audioEngine.getPluginHost().scanForPlugins(false);
-        scanButton.setButtonText("Rescan Plugins");
-        scanButton.setEnabled(true);
-        rebuildSlots();
-        setSize(kWidth, calcHeight());
-    };
+    scanButton.onClick = [this] { showScanMenu(); };
     scanButton.setButtonText(audioEngine.getPluginHost().getNumPlugins() == 0
                              ? "Scan for Plugins" : "Rescan Plugins");
     addAndMakeVisible(scanButton);
@@ -377,4 +368,48 @@ void PluginManagerComponent::resized()
             area.removeFromTop(4);
         }
     }
+}
+
+void PluginManagerComponent::showScanMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem(1, "Scan Default Directories");
+    menu.addItem(2, "Scan Custom Directory...");
+
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this](int id)
+    {
+        if (id == 1)
+        {
+            scanButton.setEnabled(false);
+            scanButton.setButtonText("Scanning...");
+            audioEngine.getPluginHost().scanForPlugins(false);
+            scanButton.setButtonText("Rescan Plugins");
+            scanButton.setEnabled(true);
+            rebuildSlots();
+            setSize(kWidth, calcHeight());
+        }
+        else if (id == 2)
+        {
+            fileChooser = std::make_unique<juce::FileChooser>(
+                "Select VST3 Plugin Directory",
+                juce::File("C:\\Program Files\\Common Files\\VST3"));
+
+            const auto flags = juce::FileBrowserComponent::openMode |
+                               juce::FileBrowserComponent::canSelectDirectories;
+
+            fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+            {
+                auto dir = chooser.getResult();
+                if (!dir.isDirectory()) return;
+
+                scanButton.setEnabled(false);
+                scanButton.setButtonText("Scanning...");
+                audioEngine.getPluginHost().scanDirectory(dir);
+                scanButton.setButtonText("Rescan Plugins");
+                scanButton.setEnabled(true);
+                rebuildSlots();
+                setSize(kWidth, calcHeight());
+            });
+        }
+    });
 }

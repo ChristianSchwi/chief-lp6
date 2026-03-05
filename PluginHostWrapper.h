@@ -59,6 +59,13 @@ public:
      * @brief Rescan plugins (useful after installing new plugins)
      */
     void rescanPlugins(bool showProgress = true);
+
+    /**
+     * @brief Scan a single directory (and subdirectories) for VST3 plugins,
+     *        adding any new finds to the known list without clearing it first.
+     * @return Number of NEW plugins found in this directory
+     */
+    int scanDirectory(const juce::File& directory);
     
     /**
      * @brief Get list of all known plugins

@@ -75,6 +75,11 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
         "FX: add, remove, or bypass VST/AU plugins in this channel's insert chain.");
     addAndMakeVisible(fxButton);
 
+    undoButton.onClick = [this] { undoClicked(); };
+    undoButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
+    undoButton.setTooltip("Undo last overdub layer");
+    addAndMakeVisible(undoButton);
+
     //--------------------------------------------------------------------------
     // Monitor mode
     // Order matches user request: Always On / While Recording / While Active / Always Off
@@ -118,6 +123,21 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     soloButton.onClick = [this] { soloClicked(); };
     addAndMakeVisible(soloButton);
 
+    // Mute group assignment buttons
+    for (int g = 0; g < 4; ++g)
+    {
+        muteGroupButtons[g].setButtonText(juce::String(g + 1));
+        muteGroupButtons[g].setClickingTogglesState(false);
+        muteGroupButtons[g].setColour(juce::TextButton::buttonOnColourId, juce::Colours::orange);
+        muteGroupButtons[g].setTooltip("Assign to mute group " + juce::String(g + 1));
+        muteGroupButtons[g].onClick = [this, g]
+        {
+            const int current = audioEngine.getChannelMuteGroup(channelIndex);
+            audioEngine.setChannelMuteGroup(channelIndex, current == (g + 1) ? 0 : (g + 1));
+        };
+        addAndMakeVisible(muteGroupButtons[g]);
+    }
+
     updateMainButton();
     startTimer(100);  // 10 Hz
 }
@@ -158,17 +178,25 @@ void ChannelStripComponent::resized()
 
     // Secondary buttons row
     auto btnRow = area.removeFromTop(26);
-    const int btnW = btnRow.getWidth() / 3;
-    clrButton.setBounds(btnRow.removeFromLeft(btnW).reduced(1));
-    ioButton .setBounds(btnRow.removeFromLeft(btnW).reduced(1));
-    fxButton .setBounds(btnRow                     .reduced(1));
+    const int btnW = btnRow.getWidth() / 4;
+    clrButton .setBounds(btnRow.removeFromLeft(btnW).reduced(1));
+    ioButton  .setBounds(btnRow.removeFromLeft(btnW).reduced(1));
+    fxButton  .setBounds(btnRow.removeFromLeft(btnW).reduced(1));
+    undoButton.setBounds(btnRow                     .reduced(1));
     area.removeFromTop(4);
 
     // Mute / Solo
     auto msRow = area.removeFromTop(26);
     muteButton.setBounds(msRow.removeFromLeft(msRow.getWidth() / 2).reduced(2));
     soloButton.setBounds(msRow.reduced(2));
-    area.removeFromTop(4);
+    area.removeFromTop(2);
+
+    // Mute group assignment
+    auto mgRow = area.removeFromTop(20);
+    const int mgW = mgRow.getWidth() / 4;
+    for (int g = 0; g < 4; ++g)
+        muteGroupButtons[g].setBounds(mgRow.removeFromLeft(mgW).reduced(1));
+    area.removeFromTop(2);
 
     // Monitor mode
     monitorModeBox.setBounds(area.removeFromTop(22));
@@ -183,11 +211,19 @@ void ChannelStripComponent::resized()
 void ChannelStripComponent::mouseDown(const juce::MouseEvent& e)
 {
     audioEngine.setActiveChannel(channelIndex);
-    repaint();  // immediate visual feedback
+    repaint();
 
-    // Right-click context menu
-    if (e.mods.isRightButtonDown())
-        showContextMenu(e);
+    if (!e.mods.isRightButtonDown())
+        return;
+
+    auto pos = e.getPosition();
+    auto hit = [&](juce::Component& c) { return c.getBounds().contains(pos); };
+
+    if      (hit(mainButton))  showMidiContextMenu(MidiControlTarget::MainButton);
+    else if (hit(clrButton))   showMidiContextMenu(MidiControlTarget::Clear);
+    else if (hit(muteButton))  showMidiContextMenu(MidiControlTarget::Mute);
+    else if (hit(soloButton))  showMidiContextMenu(MidiControlTarget::Solo);
+    else if (hit(gainSlider))  showMidiContextMenu(MidiControlTarget::Gain);
 }
 
 //==============================================================================
@@ -210,10 +246,16 @@ void ChannelStripComponent::timerCallback()
     if (!channel) return;
 
     clrButton.setEnabled(channel_hasLoop());
+    undoButton.setEnabled(channel->canUndoOverdub());
 
     // Sync mute / solo buttons
     muteButton.setToggleState(channel->isMuted(), juce::dontSendNotification);
     soloButton.setToggleState(channel->isSolo(),  juce::dontSendNotification);
+
+    // Sync mute group buttons
+    const int currentGroup = audioEngine.getChannelMuteGroup(channelIndex);
+    for (int g = 0; g < 4; ++g)
+        muteGroupButtons[g].setToggleState(currentGroup == g + 1, juce::dontSendNotification);
 
     // Sync monitor mode box
     {
@@ -413,6 +455,14 @@ void ChannelStripComponent::clrButtonClicked()
     audioEngine.sendCommand(cmd);
 }
 
+void ChannelStripComponent::undoClicked()
+{
+    Command cmd;
+    cmd.type         = CommandType::UndoOverdub;
+    cmd.channelIndex = channelIndex;
+    audioEngine.sendCommand(cmd);
+}
+
 bool ChannelStripComponent::channel_hasLoop() const
 {
     auto* channel = audioEngine.getChannel(channelIndex);
@@ -461,56 +511,22 @@ void ChannelStripComponent::monitorModeChanged()
     audioEngine.sendCommand(cmd);
 }
 
-void ChannelStripComponent::showContextMenu(const juce::MouseEvent&)
+void ChannelStripComponent::showMidiContextMenu(MidiControlTarget target)
 {
-    static const MidiControlTarget chTargets[] = {
-        MidiControlTarget::MainButton,
-        MidiControlTarget::Gain,
-        MidiControlTarget::Mute,
-        MidiControlTarget::Solo,
-        MidiControlTarget::Clear
-    };
-    static const char* chLabels[] = { "Main Button", "Gain", "Mute", "Solo", "CLR" };
-
     auto& mlm = audioEngine.getMidiLearnManager();
-    const bool wasUnlearning = mlm.isUnlearning();
+    const bool hasMapping = mlm.getMapping(channelIndex, target).isValid();
+    const auto name = MidiLearnManager::targetName(target);
 
     juce::PopupMenu menu;
-    if (wasUnlearning)
-    {
-        for (int i = 0; i < 5; ++i)
-        {
-            const bool hasMidi = mlm.getMapping(channelIndex, chTargets[i]).isValid();
-            menu.addItem(i + 1,
-                         juce::String("Remove MIDI: ") + chLabels[i],
-                         hasMidi);  // greyed if no mapping
-        }
-    }
-    else
-    {
-        for (int i = 0; i < 5; ++i)
-            menu.addItem(i + 1, juce::String("MIDI Learn: ") + chLabels[i]);
-    }
+    menu.addItem(1, "MIDI Learn: " + name);
+    menu.addItem(2, "Remove MIDI: " + name, hasMapping);
 
-    menu.showMenuAsync(juce::PopupMenu::Options(), [this, wasUnlearning](int id)
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this, target](int id)
     {
-        if (id < 1 || id > 5) return;
-        static const MidiControlTarget chTargets[] = {
-            MidiControlTarget::MainButton,
-            MidiControlTarget::Gain,
-            MidiControlTarget::Mute,
-            MidiControlTarget::Solo,
-            MidiControlTarget::Clear
-        };
         auto& mlm = audioEngine.getMidiLearnManager();
-        if (wasUnlearning)
-        {
-            mlm.removeMapping(channelIndex, chTargets[id - 1]);
-            mlm.stopUnlearning();
-        }
-        else
-        {
-            mlm.startLearning(channelIndex, chTargets[id - 1]);
-        }
+        if (id == 1)
+            mlm.startLearning(channelIndex, target);
+        else if (id == 2)
+            mlm.removeMapping(channelIndex, target);
     });
 }

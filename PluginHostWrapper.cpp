@@ -130,6 +130,47 @@ int PluginHostWrapper::scanForPlugins(bool showProgress)
     return knownPlugins.getNumTypes();
 }
 
+int PluginHostWrapper::scanDirectory(const juce::File& directory)
+{
+    juce::AudioPluginFormat* vst3Format = nullptr;
+    for (int i = 0; i < formatManager.getNumFormats(); ++i)
+    {
+        auto* format = formatManager.getFormat(i);
+        if (format->getName().contains("VST3"))
+        {
+            vst3Format = format;
+            break;
+        }
+    }
+
+    if (!vst3Format)
+        return 0;
+
+    const int before = knownPlugins.getNumTypes();
+
+    juce::FileSearchPath searchPaths;
+    searchPaths.add(directory);
+
+    juce::PluginDirectoryScanner scanner(knownPlugins,
+                                         *vst3Format,
+                                         searchPaths,
+                                         true,
+                                         juce::File());
+
+    juce::String pluginBeingScanned;
+    while (scanner.scanNextFile(true, pluginBeingScanned))
+    {
+        DBG("Scanning: " + pluginBeingScanned);
+    }
+
+    const int found = knownPlugins.getNumTypes() - before;
+    DBG("Custom scan complete. Found " + juce::String(found) + " new plugins in " +
+        directory.getFullPathName());
+
+    saveKnownPluginList(getDefaultPluginListFile());
+    return found;
+}
+
 void PluginHostWrapper::rescanPlugins(bool showProgress)
 {
     scanForPlugins(showProgress);

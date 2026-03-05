@@ -115,6 +115,7 @@ void MidiLearnManager::removeAllMappings()
 {
     juce::ScopedLock sl(mappingsLock);
     mappings.clear();
+    lastMainButtonTriggerTime.clear();
     saveImmediately();
 }
 
@@ -261,6 +262,10 @@ void MidiLearnManager::processMidiMessage(const juce::MidiMessage& msg)
             case MidiControlTarget::MonitorMode:
                 newMapping.minValue = 0.0f;
                 newMapping.maxValue = 3.0f;
+                break;
+            case MidiControlTarget::MasterGain:
+                newMapping.minValue = 0.0f;
+                newMapping.maxValue = 1.0f;
                 break;
             default:
                 newMapping.minValue = 0.0f;
@@ -439,6 +444,24 @@ void MidiLearnManager::applyMapping(const MidiMapping& m, const juce::MidiMessag
         {
             if (norm < 0.5f) return;
 
+            // Double-press detection → undo last overdub
+            {
+                const double now = juce::Time::getMillisecondCounterHiRes();
+                const juce::String key = m.getKey();
+                auto it = lastMainButtonTriggerTime.find(key);
+                if (it != lastMainButtonTriggerTime.end() &&
+                    (now - it->second) < doublePressWindowMs)
+                {
+                    it->second = 0.0;  // reset so triple-press doesn't re-trigger
+                    Command undoCmd;
+                    undoCmd.type         = CommandType::UndoOverdub;
+                    undoCmd.channelIndex = effectiveChannel;
+                    audioEngine.sendCommand(undoCmd);
+                    return;
+                }
+                lastMainButtonTriggerTime[key] = now;
+            }
+
             auto* ch = audioEngine.getChannel(effectiveChannel);
             if (!ch) return;
 
@@ -520,6 +543,31 @@ void MidiLearnManager::applyMapping(const MidiMapping& m, const juce::MidiMessag
             if (norm >= 0.5f)
                 audioEngine.setAutoStart(!audioEngine.isAutoStartEnabled(),
                                          audioEngine.getAutoStartThresholdDb());
+            return;
+
+        case MidiControlTarget::MuteGroupToggle1:
+            if (norm >= 0.5f) audioEngine.toggleMuteGroup(0);
+            return;
+        case MidiControlTarget::MuteGroupToggle2:
+            if (norm >= 0.5f) audioEngine.toggleMuteGroup(1);
+            return;
+        case MidiControlTarget::MuteGroupToggle3:
+            if (norm >= 0.5f) audioEngine.toggleMuteGroup(2);
+            return;
+        case MidiControlTarget::MuteGroupToggle4:
+            if (norm >= 0.5f) audioEngine.toggleMuteGroup(3);
+            return;
+
+        case MidiControlTarget::TapTempo:
+            if (norm >= 0.5f && onTapTempo) onTapTempo();
+            return;
+
+        case MidiControlTarget::MasterGain:
+            audioEngine.setMasterGain(mapped);
+            return;
+
+        case MidiControlTarget::DoubleLoopLength:
+            if (norm >= 0.5f) audioEngine.doubleLoopLength();
             return;
 
         default:
@@ -856,6 +904,13 @@ juce::String MidiLearnManager::targetName(MidiControlTarget t)
         case MidiControlTarget::GlobalOverdubToggle: return "Overdub Mode On/Off";
         case MidiControlTarget::LatchModeToggle:     return "Latch Mode On/Off";
         case MidiControlTarget::AutoStartToggle:     return "Auto Start On/Off";
+        case MidiControlTarget::MuteGroupToggle1:   return "Mute Group 1 On/Off";
+        case MidiControlTarget::MuteGroupToggle2:   return "Mute Group 2 On/Off";
+        case MidiControlTarget::MuteGroupToggle3:   return "Mute Group 3 On/Off";
+        case MidiControlTarget::MuteGroupToggle4:   return "Mute Group 4 On/Off";
+        case MidiControlTarget::TapTempo:            return "Tap Tempo";
+        case MidiControlTarget::MasterGain:          return "Master Volume";
+        case MidiControlTarget::DoubleLoopLength:    return "Double Loop Length";
         default:                                     return "Unknown";
     }
 }

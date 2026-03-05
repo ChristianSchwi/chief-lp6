@@ -20,6 +20,19 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     addAndMakeVisible(panicButton);
 
     //--------------------------------------------------------------------------
+    // Master volume
+    masterGainLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(masterGainLabel);
+
+    masterGainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    masterGainSlider.setRange(0.0, 1.0, 0.01);
+    masterGainSlider.setValue(1.0, juce::dontSendNotification);
+    masterGainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 40, 20);
+    masterGainSlider.setTooltip("Master output volume (0 = silent, 1 = full).");
+    masterGainSlider.onValueChange = [this] { masterGainChanged(); };
+    addAndMakeVisible(masterGainSlider);
+
+    //--------------------------------------------------------------------------
     // Channel navigation
     prevChannelButton.setTooltip("Previous channel  [<-]");
     prevChannelButton.onClick = [this] { prevChannelClicked(); };
@@ -34,7 +47,7 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     addAndMakeVisible(activeChannelLabel);
 
     // Global MIDI learn
-    midiLearnButton.onClick = [this] { showGlobalMidiLearnMenu(); };
+    midiLearnButton.onClick = [this] { showMidiButtonMenu(); };
     midiLearnButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF004488));
     addAndMakeVisible(midiLearnButton);
 
@@ -52,18 +65,21 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     bpmLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(bpmLabel);
 
-    bpmSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    bpmSlider.setRange(40.0, 240.0, 0.1);
-    bpmSlider.setValue(audioEngine.getLoopEngine().getBPM(), juce::dontSendNotification);
-    bpmSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 55, 20);
-    bpmSlider.onValueChange = [this] { bpmChanged(); };
-    addAndMakeVisible(bpmSlider);
+    bpmEditor.setInputRestrictions(6, "0123456789.");
+    bpmEditor.setText(juce::String(audioEngine.getLoopEngine().getBPM(), 1), juce::dontSendNotification);
+    bpmEditor.setJustification(juce::Justification::centred);
+    bpmEditor.onReturnKey = [this] { bpmChanged(); };
+    bpmEditor.onFocusLost = [this] { bpmChanged(); };
+    addAndMakeVisible(bpmEditor);
 
     //--------------------------------------------------------------------------
     // Tap tempo
     tapButton.setTooltip("Tap repeatedly to set BPM. Sequence resets after 3 s of silence.");
     tapButton.onClick = [this] { tapClicked(); };
     addAndMakeVisible(tapButton);
+
+    // Wire MIDI tap-tempo callback
+    audioEngine.getMidiLearnManager().onTapTempo = [this] { tapClicked(); };
 
     //--------------------------------------------------------------------------
     // Latch Mode
@@ -191,10 +207,31 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     addAndMakeVisible(fixedLenMinusBtn);
 
     //--------------------------------------------------------------------------
+    // Double Loop
+    doubleLoopButton.setTooltip("Double the loop length. Recorded content is duplicated and plays twice.");
+    doubleLoopButton.onClick = [this] { audioEngine.doubleLoopLength(); };
+    addAndMakeVisible(doubleLoopButton);
+
+    //--------------------------------------------------------------------------
     // Reset Song
     resetSongButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
     resetSongButton.onClick = [this] { resetSongClicked(); };
     addAndMakeVisible(resetSongButton);
+
+    //--------------------------------------------------------------------------
+    // Mute Groups
+    for (int g = 0; g < 4; ++g)
+    {
+        muteGroupToggleButtons[g].setButtonText("G" + juce::String(g + 1));
+        muteGroupToggleButtons[g].setClickingTogglesState(false);
+        muteGroupToggleButtons[g].setColour(juce::TextButton::buttonOnColourId, juce::Colours::red);
+        muteGroupToggleButtons[g].setTooltip("Toggle mute group " + juce::String(g + 1));
+        muteGroupToggleButtons[g].onClick = [this, g]
+        {
+            audioEngine.setMuteGroupActive(g, !audioEngine.isMuteGroupActive(g));
+        };
+        addAndMakeVisible(muteGroupToggleButtons[g]);
+    }
 
     updateMetronomeButtonStates();
     startTimer(50);  // 20 Hz
@@ -211,6 +248,7 @@ void TransportComponent::refreshAfterAudioInit()
     // Jetzt kennt die AudioEngine die tatsächliche Ausgangskanal-Anzahl
     populateMetroOutputBox();
     metroGainSlider.setValue(audioEngine.getMetronomeGain(), juce::dontSendNotification);
+    masterGainSlider.setValue(audioEngine.getMasterGain(), juce::dontSendNotification);
 
     // Restore fixed-length editor from engine value
     fixedLenEditor.setText(juce::String(audioEngine.getFixedLengthBars()),
@@ -279,6 +317,14 @@ void TransportComponent::resized()
         panicButton   .setBounds(row.removeFromRight(82).reduced(0, 4));
         playStopButton.setBounds(row.reduced(0, 4));
     }
+    area.removeFromTop(2);
+    {
+        auto row = area.removeFromTop(26);
+        masterGainLabel .setBounds(row.removeFromLeft(55));
+        masterGainSlider.setBounds(row);
+    }
+    area.removeFromTop(2);
+    doubleLoopButton.setBounds(area.removeFromTop(26).reduced(0, 1));
     area.removeFromTop(6);
 
     // ── ACTIVE CHANNEL ────────────────────────────────────────────────────────
@@ -291,18 +337,22 @@ void TransportComponent::resized()
     }
     area.removeFromTop(6);
 
-    // ── CLOCK ─────────────────────────────────────────────────────────────────
-    addSection("CLOCK");
-    metronomeButton    .setBounds(area.removeFromTop(26));
-    area.removeFromTop(4);
-    metronomeMuteButton.setBounds(area.removeFromTop(26));
+    // ── METRONOME ─────────────────────────────────────────────────────────────
+    addSection("METRONOME");
+    {
+        auto row = area.removeFromTop(26);
+        const int half = row.getWidth() / 2;
+        metronomeButton    .setBounds(row.removeFromLeft(half));
+        metronomeMuteButton.setBounds(row);
+    }
     area.removeFromTop(4);
     {
         auto row = area.removeFromTop(26);
-        bpmLabel .setBounds(row.removeFromLeft(55));
-        bpmSlider.setBounds(row);
+        bpmLabel .setBounds(row.removeFromLeft(38));
+        bpmEditor.setBounds(row.removeFromLeft(55).reduced(0, 3));
+        row.removeFromLeft(4);
+        tapButton.setBounds(row);
     }
-    tapButton.setBounds(area.removeFromTop(24));
     area.removeFromTop(2);
     {
         auto row = area.removeFromTop(26);
@@ -316,11 +366,6 @@ void TransportComponent::resized()
     }
     {
         auto row = area.removeFromTop(26);
-        metroOutLabel .setBounds(row.removeFromLeft(80));
-        metroOutputBox.setBounds(row);
-    }
-    {
-        auto row = area.removeFromTop(26);
         countInLabel.setBounds(row.removeFromLeft(72));
         countInBox  .setBounds(row);
     }
@@ -329,8 +374,13 @@ void TransportComponent::resized()
         fixedLenLabel    .setBounds(row.removeFromLeft(55));
         fixedLenEditor   .setBounds(row.removeFromLeft(40).reduced(0, 3));
         fixedLenBarsLabel.setBounds(row.removeFromLeft(30));
-        fixedLenPlusBtn  .setBounds(row.removeFromLeft(24).reduced(1, 3));
         fixedLenMinusBtn .setBounds(row.removeFromLeft(24).reduced(1, 3));
+        fixedLenPlusBtn  .setBounds(row.removeFromLeft(24).reduced(1, 3));
+    }
+    {
+        auto row = area.removeFromTop(26);
+        metroOutLabel .setBounds(row.removeFromLeft(80));
+        metroOutputBox.setBounds(row);
     }
     area.removeFromTop(6);
 
@@ -357,6 +407,16 @@ void TransportComponent::resized()
         resetSongButton .setBounds(row                    .reduced(2, 3));
     }
     area.removeFromTop(6);
+
+    // ── MUTE GROUPS ──────────────────────────────────────────────────────────
+    addSection("MUTE GROUPS");
+    {
+        auto row = area.removeFromTop(24);
+        const int btnW = row.getWidth() / 4;
+        for (int g = 0; g < 4; ++g)
+            muteGroupToggleButtons[g].setBounds(row.removeFromLeft(btnW).reduced(1, 1));
+    }
+    area.removeFromTop(6);
 }
 
 //==============================================================================
@@ -378,12 +438,18 @@ void TransportComponent::updateDisplay()
                              playing ? juce::Colours::red : juce::Colours::green);
 
     const bool hasRec = audioEngine.hasAnyRecordings();
-    bpmSlider .setEnabled(!hasRec);
+    bpmEditor .setEnabled(!hasRec);
     tapButton .setEnabled(!hasRec);
     beatsPerBarSlider.setEnabled(!playing);
 
     overdubButton  .setToggleState(audioEngine.isInOverdubMode(), juce::dontSendNotification);
     latchModeButton.setToggleState(audioEngine.isLatchMode(),     juce::dontSendNotification);
+
+    doubleLoopButton.setEnabled(hasRec);
+
+    // Sync master volume slider when changed via MIDI
+    if (!masterGainSlider.isMouseButtonDown())
+        masterGainSlider.setValue(audioEngine.getMasterGain(), juce::dontSendNotification);
 
     // Active channel display
     activeChannelLabel.setText("Active: Ch" + juce::String(audioEngine.getActiveChannel() + 1),
@@ -415,6 +481,11 @@ void TransportComponent::updateDisplay()
         midiLearnButton.setColour(juce::TextButton::buttonColourId,
                                   juce::Colour(0xFF004488));
     }
+
+    // Mute group toggle buttons
+    for (int g = 0; g < 4; ++g)
+        muteGroupToggleButtons[g].setToggleState(audioEngine.isMuteGroupActive(g),
+                                                  juce::dontSendNotification);
 }
 
 void TransportComponent::updateMetronomeButtonStates()
@@ -463,9 +534,11 @@ void TransportComponent::overdubModeChanged()
 
 void TransportComponent::bpmChanged()
 {
+    const double val = juce::jlimit(40.0, 240.0, bpmEditor.getText().getDoubleValue());
+    bpmEditor.setText(juce::String(val, 1), juce::dontSendNotification);
     Command cmd;
     cmd.type       = CommandType::SetBPM;
-    cmd.floatValue = static_cast<float>(bpmSlider.getValue());
+    cmd.floatValue = static_cast<float>(val);
     audioEngine.sendCommand(cmd);
 }
 
@@ -488,7 +561,8 @@ void TransportComponent::tapClicked()
 
     const double avgMs  = totalMs / static_cast<double>(tapTimes.size() - 1);
     const double newBpm = juce::jlimit(40.0, 240.0, 60000.0 / avgMs);
-    bpmSlider.setValue(newBpm, juce::sendNotification);
+    bpmEditor.setText(juce::String(newBpm, 1), juce::dontSendNotification);
+    bpmChanged();
 }
 
 void TransportComponent::latchModeChanged()
@@ -567,7 +641,7 @@ void TransportComponent::applyFixedLenEditor()
 
 void TransportComponent::fixedLenStep(int direction)
 {
-    static const int steps[] = {0, 1, 2, 8, 16, 32, 64};
+    static const int steps[] = {0, 1, 2, 4, 8, 16, 32, 64};
     static const int nSteps  = (int)std::size(steps);
 
     const int current = audioEngine.getFixedLengthBars();
@@ -620,34 +694,53 @@ void TransportComponent::nextChannelClicked()
     audioEngine.nextChannel();
 }
 
-void TransportComponent::showGlobalMidiLearnMenu()
+void TransportComponent::mouseDown(const juce::MouseEvent& e)
 {
-    static const MidiControlTarget targets[] = {
-        MidiControlTarget::GlobalPlayStop,
-        MidiControlTarget::Panic,
-        MidiControlTarget::MetronomeToggle,
-        MidiControlTarget::GlobalOverdubToggle,
-        MidiControlTarget::LatchModeToggle,
-        MidiControlTarget::AutoStartToggle,
-        MidiControlTarget::NextChannel,
-        MidiControlTarget::PrevChannel,
-        MidiControlTarget::NextSong,
-        MidiControlTarget::PrevSong
-    };
-    static const char* labels[] = {
-        "Global Play/Stop",
-        "Panic",
-        "Metronome On/Off",
-        "Overdub Mode On/Off",
-        "Latch Mode On/Off",
-        "Auto Start On/Off",
-        "Next Channel",
-        "Prev Channel",
-        "Next Song",
-        "Prev Song"
-    };
-    static constexpr int numTargets = (int)std::size(targets);
+    if (!e.mods.isRightButtonDown())
+        return;
 
+    auto pos = e.getPosition();
+    auto hit = [&](juce::Component& c) { return c.getBounds().contains(pos); };
+
+    if      (hit(playStopButton))    showMidiContextMenu(MidiControlTarget::GlobalPlayStop);
+    else if (hit(panicButton))       showMidiContextMenu(MidiControlTarget::Panic);
+    else if (hit(metronomeButton))   showMidiContextMenu(MidiControlTarget::MetronomeToggle);
+    else if (hit(overdubButton))     showMidiContextMenu(MidiControlTarget::GlobalOverdubToggle);
+    else if (hit(latchModeButton))   showMidiContextMenu(MidiControlTarget::LatchModeToggle);
+    else if (hit(autoStartButton))   showMidiContextMenu(MidiControlTarget::AutoStartToggle);
+    else if (hit(prevChannelButton)) showMidiContextMenu(MidiControlTarget::PrevChannel);
+    else if (hit(nextChannelButton)) showMidiContextMenu(MidiControlTarget::NextChannel);
+    else if (hit(tapButton))         showMidiContextMenu(MidiControlTarget::TapTempo);
+    else if (hit(masterGainSlider))  showMidiContextMenu(MidiControlTarget::MasterGain);
+    else if (hit(doubleLoopButton))  showMidiContextMenu(MidiControlTarget::DoubleLoopLength);
+    else if (hit(muteGroupToggleButtons[0])) showMidiContextMenu(MidiControlTarget::MuteGroupToggle1);
+    else if (hit(muteGroupToggleButtons[1])) showMidiContextMenu(MidiControlTarget::MuteGroupToggle2);
+    else if (hit(muteGroupToggleButtons[2])) showMidiContextMenu(MidiControlTarget::MuteGroupToggle3);
+    else if (hit(muteGroupToggleButtons[3])) showMidiContextMenu(MidiControlTarget::MuteGroupToggle4);
+}
+
+void TransportComponent::showMidiContextMenu(MidiControlTarget target)
+{
+    auto& mlm = audioEngine.getMidiLearnManager();
+    const bool hasMapping = mlm.getMapping(-1, target).isValid();
+    const auto name = MidiLearnManager::targetName(target);
+
+    juce::PopupMenu menu;
+    menu.addItem(1, "MIDI Learn: " + name);
+    menu.addItem(2, "Remove MIDI: " + name, hasMapping);
+
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this, target](int id)
+    {
+        auto& mlm = audioEngine.getMidiLearnManager();
+        if (id == 1)
+            mlm.startLearning(-1, target);
+        else if (id == 2)
+            mlm.removeMapping(-1, target);
+    });
+}
+
+void TransportComponent::showMidiButtonMenu()
+{
     auto& mlm = audioEngine.getMidiLearnManager();
     const bool isLearn   = mlm.isLearning();
     const bool isUnlearn = mlm.isUnlearning();
@@ -655,82 +748,38 @@ void TransportComponent::showGlobalMidiLearnMenu()
     juce::PopupMenu menu;
 
     if (isLearn)
-    {
-        menu.addItem(20, "Abort Learning");
-    }
+        menu.addItem(1, "Abort Learning");
     else if (isUnlearn)
-    {
-        for (int i = 0; i < numTargets; ++i)
-        {
-            const bool hasMidi = mlm.getMapping(-1, targets[i]).isValid();
-            menu.addItem(i + 1,
-                         juce::String("Remove MIDI: ") + labels[i],
-                         hasMidi);  // greyed if no mapping
-            if (i == 5) menu.addSeparator();  // separator after AutoStart
-        }
-        menu.addSeparator();
-        menu.addItem(21, "Abort Unlearning");
-    }
-    else
-    {
-        for (int i = 0; i < numTargets; ++i)
-        {
-            menu.addItem(i + 1, juce::String("MIDI Learn: ") + labels[i]);
-            if (i == 5) menu.addSeparator();  // separator after AutoStart
-        }
-        menu.addSeparator();
-        menu.addItem(11, "Start MIDI Unlearn");
-        menu.addItem(12, "Remove ALL MIDI Mappings");
-    }
+        menu.addItem(2, "Abort Unlearning");
 
-    const bool wasUnlearning = isUnlearn;
-    menu.showMenuAsync(juce::PopupMenu::Options(), [this, wasUnlearning](int id)
+    menu.addSeparator();
+    menu.addItem(4, "Remove ALL MIDI Mappings");
+
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this](int id)
     {
-        if (id <= 0) return;
         auto& mlm = audioEngine.getMidiLearnManager();
-
-        if (id == 20) { mlm.stopLearning();    return; }
-        if (id == 21) { mlm.stopUnlearning();  return; }
-        if (id == 11) { mlm.startUnlearning(); return; }
-        if (id == 12)
+        if (id == 1) mlm.stopLearning();
+        else if (id == 2) mlm.stopUnlearning();
+        else if (id == 3) mlm.startUnlearning();
+        else if (id == 4)
         {
-            auto options = juce::MessageBoxOptions()
+            auto opts = juce::MessageBoxOptions()
                 .withIconType(juce::MessageBoxIconType::WarningIcon)
                 .withTitle("Remove ALL MIDI Mappings")
-                .withMessage("This will delete every MIDI mapping (all channels and global controls). Continue?")
+                .withMessage("This will delete every MIDI mapping. Continue?")
                 .withButton("Remove All")
                 .withButton("Cancel");
-            juce::AlertWindow::showAsync(options, [this](int result) {
+            juce::AlertWindow::showAsync(opts, [this](int result) {
                 if (result == 1)
                     audioEngine.getMidiLearnManager().removeAllMappings();
             });
-            return;
-        }
-
-        static const MidiControlTarget targets[] = {
-            MidiControlTarget::GlobalPlayStop,
-            MidiControlTarget::Panic,
-            MidiControlTarget::MetronomeToggle,
-            MidiControlTarget::GlobalOverdubToggle,
-            MidiControlTarget::LatchModeToggle,
-            MidiControlTarget::AutoStartToggle,
-            MidiControlTarget::NextChannel,
-            MidiControlTarget::PrevChannel,
-            MidiControlTarget::NextSong,
-            MidiControlTarget::PrevSong
-        };
-        if (id < 1 || id > (int)std::size(targets)) return;
-
-        if (wasUnlearning)
-        {
-            mlm.removeMapping(-1, targets[id - 1]);
-            mlm.stopUnlearning();
-        }
-        else
-        {
-            mlm.startLearning(-1, targets[id - 1]);
         }
     });
+}
+
+void TransportComponent::masterGainChanged()
+{
+    audioEngine.setMasterGain(static_cast<float>(masterGainSlider.getValue()));
 }
 
 void TransportComponent::populateMetroOutputBox()

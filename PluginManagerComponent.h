@@ -86,9 +86,12 @@ private:
     std::unique_ptr<PluginSlotRow> vstiSlot;
     std::array<std::unique_ptr<PluginSlotRow>, 3> fxSlots;
 
+    std::unique_ptr<juce::FileChooser> fileChooser;
+
     void setChannelType(ChannelType type);
     void rebuildSlots();
     int  calcHeight() const;
+    void showScanMenu();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginManagerComponent)
 };

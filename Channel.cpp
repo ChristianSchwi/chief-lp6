@@ -60,6 +60,8 @@ void Channel::prepareToPlay(double newSampleRate, int newMaxBlockSize,
     if (!hasContent)
         loopBuffer.clear();
 
+    overdubLayers.reserve(32);
+
     workingBuffer.setSize(2, newMaxBlockSize * 2, false, true, true);
     fxBuffer     .setSize(2, newMaxBlockSize * 2, false, true, true);
     workingBuffer.clear();
@@ -87,6 +89,10 @@ void Channel::releaseResources()
     loopBuffer   .setSize(0, 0);
     workingBuffer.setSize(0, 0);
     fxBuffer     .setSize(0, 0);
+    overdubLayers.clear();
+    activeOverdubLayerIdx = -1;
+    auto* staged = stagedOverdubBuffer.exchange(nullptr, std::memory_order_relaxed);
+    delete staged;
 }
 
 //==============================================================================
@@ -104,9 +110,30 @@ void Channel::clearPendingActions()
 void Channel::startRecording(bool isOverdub)
 {
     if (isOverdub && loopHasContent.load(std::memory_order_relaxed))
+    {
+        // Create a new overdub layer from the pre-staged buffer (message thread allocated)
+        auto* staged = stagedOverdubBuffer.exchange(nullptr, std::memory_order_acquire);
+        if (staged)
+        {
+            overdubLayers.push_back(std::move(*staged));
+            delete staged;
+        }
+        else
+        {
+            // Fallback: allocate on audio thread (small buffer = loopBufferSize)
+            overdubLayers.emplace_back(2, static_cast<int>(loopBufferSize));
+            overdubLayers.back().clear();
+        }
+        activeOverdubLayerIdx = static_cast<int>(overdubLayers.size()) - 1;
         state.store(ChannelState::Overdubbing, std::memory_order_release);
+    }
     else
-        state.store(ChannelState::Recording,   std::memory_order_release);
+    {
+        // Fresh recording: clear all overdub layers
+        overdubLayers.clear();
+        activeOverdubLayerIdx = -1;
+        state.store(ChannelState::Recording, std::memory_order_release);
+    }
 }
 
 void Channel::stopRecording()
@@ -114,6 +141,7 @@ void Channel::stopRecording()
     const auto cur = state.load(std::memory_order_relaxed);
     if (cur == ChannelState::Recording || cur == ChannelState::Overdubbing)
     {
+        activeOverdubLayerIdx = -1;  // layer stays in vector for playback
         loopHasContent.store(true, std::memory_order_release);
         state.store(ChannelState::Playing, std::memory_order_release);
     }
@@ -198,6 +226,27 @@ void Channel::checkAndExecutePendingStop(juce::int64 playheadPosition,
     }
 }
 
+void Channel::doubleBuffer(juce::int64 currentLoopLength)
+{
+    if (!loopHasContent.load(std::memory_order_relaxed)) return;
+    if (currentLoopLength <= 0 || currentLoopLength * 2 > loopBufferSize) return;
+
+    const int len = static_cast<int>(currentLoopLength);
+
+    // Duplicate base loop buffer
+    for (int ch = 0; ch < juce::jmin(2, loopBuffer.getNumChannels()); ++ch)
+        loopBuffer.copyFrom(ch, len, loopBuffer, ch, 0, len);
+
+    // Duplicate overdub layers
+    for (auto& layer : overdubLayers)
+    {
+        const int layerLen = juce::jmin(len, layer.getNumSamples() - len);
+        if (layerLen <= 0) continue;
+        for (int ch = 0; ch < juce::jmin(2, layer.getNumChannels()); ++ch)
+            layer.copyFrom(ch, len, layer, ch, 0, layerLen);
+    }
+}
+
 void Channel::clearLoop()
 {
     state.store(ChannelState::Idle, std::memory_order_release);
@@ -207,6 +256,10 @@ void Channel::clearLoop()
     overdubPending.store(false,     std::memory_order_release);
     playPending   .store(false,     std::memory_order_release);
     loopBuffer.clear();
+    overdubLayers.clear();
+    activeOverdubLayerIdx = -1;
+    auto* staged = stagedOverdubBuffer.exchange(nullptr, std::memory_order_relaxed);
+    delete staged;
 }
 
 //==============================================================================
@@ -365,30 +418,21 @@ void Channel::processFXChain(juce::AudioBuffer<float>& buffer,
 void Channel::recordToLoop(const juce::AudioBuffer<float>& source,
                            juce::int64 startPosition, int numSamples, bool isOverdub)
 {
-    if (numSamples <= 0 || startPosition < 0 || loopBufferSize <= 0) return;
+    if (numSamples <= 0 || startPosition < 0) return;
     if (source.getNumSamples() < numSamples) return;
 
-    juce::int64 writePos = startPosition % loopBufferSize;
-    int         srcPos   = 0;
-    int         remaining = numSamples;
-
-    while (remaining > 0)
+    if (isOverdub && activeOverdubLayerIdx >= 0 &&
+        activeOverdubLayerIdx < static_cast<int>(overdubLayers.size()))
     {
-        const int thisBlock = static_cast<int>(
-            juce::jmin(static_cast<juce::int64>(remaining), loopBufferSize - writePos));
-        if (thisBlock <= 0) break;
-
-        for (int ch = 0; ch < juce::jmin(2, source.getNumChannels()); ++ch)
-        {
-            if (isOverdub)
-                loopBuffer.addFrom (ch, static_cast<int>(writePos), source, ch, srcPos, thisBlock);
-            else
-                loopBuffer.copyFrom(ch, static_cast<int>(writePos), source, ch, srcPos, thisBlock);
-        }
-
-        srcPos    += thisBlock;
-        remaining -= thisBlock;
-        writePos   = (writePos + thisBlock) % loopBufferSize;
+        // Write to active overdub layer (addFrom so multi-pass accumulates)
+        auto& layer = overdubLayers[activeOverdubLayerIdx];
+        writeBufferWrapped(layer, layer.getNumSamples(), source, startPosition, numSamples, true);
+    }
+    else
+    {
+        // Write to base loop buffer (copyFrom = overwrite)
+        if (loopBufferSize <= 0) return;
+        writeBufferWrapped(loopBuffer, loopBufferSize, source, startPosition, numSamples, false);
     }
 }
 
@@ -398,25 +442,128 @@ void Channel::playFromLoop(juce::AudioBuffer<float>& dest,
     if (numSamples <= 0 || startPosition < 0 || loopBufferSize <= 0) return;
     if (!loopHasContent.load(std::memory_order_relaxed)) return;
 
-    juce::int64 readPos   = startPosition % loopBufferSize;
+    // Base layer (copyFrom)
+    readBufferWrapped(loopBuffer, loopBufferSize, dest, startPosition, numSamples, false);
+
+    // Overdub layers (addFrom)
+    for (auto& layer : overdubLayers)
+    {
+        const juce::int64 layerSize = layer.getNumSamples();
+        if (layerSize > 0)
+            readBufferWrapped(layer, layerSize, dest, startPosition, numSamples, true);
+    }
+}
+
+//==============================================================================
+// Buffer I/O helpers with wrap-around
+//==============================================================================
+
+void Channel::readBufferWrapped(const juce::AudioBuffer<float>& src, juce::int64 bufSize,
+                                juce::AudioBuffer<float>& dest, juce::int64 startPos,
+                                int numSamples, bool addToDest)
+{
+    if (bufSize <= 0) return;
+
+    juce::int64 readPos   = startPos % bufSize;
     int         destPos   = 0;
     int         remaining = numSamples;
 
     while (remaining > 0)
     {
         const int thisBlock = static_cast<int>(
-            juce::jmin(static_cast<juce::int64>(remaining), loopBufferSize - readPos));
+            juce::jmin(static_cast<juce::int64>(remaining), bufSize - readPos));
         if (thisBlock <= 0 || destPos + thisBlock > dest.getNumSamples()) break;
 
         for (int ch = 0; ch < juce::jmin(2, dest.getNumChannels()); ++ch)
-            dest.copyFrom(ch, destPos, loopBuffer, ch, static_cast<int>(readPos), thisBlock);
+        {
+            if (addToDest)
+                dest.addFrom(ch, destPos, src, ch, static_cast<int>(readPos), thisBlock);
+            else
+                dest.copyFrom(ch, destPos, src, ch, static_cast<int>(readPos), thisBlock);
+        }
 
         destPos   += thisBlock;
         remaining -= thisBlock;
-        readPos    = (readPos + thisBlock) % loopBufferSize;
+        readPos    = (readPos + thisBlock) % bufSize;
     }
 }
 
+void Channel::writeBufferWrapped(juce::AudioBuffer<float>& dst, juce::int64 bufSize,
+                                 const juce::AudioBuffer<float>& src, juce::int64 startPos,
+                                 int numSamples, bool addToBuffer)
+{
+    if (bufSize <= 0) return;
+
+    juce::int64 writePos = startPos % bufSize;
+    int         srcPos   = 0;
+    int         remaining = numSamples;
+
+    while (remaining > 0)
+    {
+        const int thisBlock = static_cast<int>(
+            juce::jmin(static_cast<juce::int64>(remaining), bufSize - writePos));
+        if (thisBlock <= 0) break;
+
+        for (int ch = 0; ch < juce::jmin(2, src.getNumChannels()); ++ch)
+        {
+            if (addToBuffer)
+                dst.addFrom(ch, static_cast<int>(writePos), src, ch, srcPos, thisBlock);
+            else
+                dst.copyFrom(ch, static_cast<int>(writePos), src, ch, srcPos, thisBlock);
+        }
+
+        srcPos    += thisBlock;
+        remaining -= thisBlock;
+        writePos   = (writePos + thisBlock) % bufSize;
+    }
+}
+
+//==============================================================================
+// Overdub Layer Management
+//==============================================================================
+
+void Channel::stageOverdubBuffer(juce::int64 loopLength)
+{
+    if (loopLength <= 0) return;
+    auto* buf = new juce::AudioBuffer<float>(2, static_cast<int>(loopLength));
+    buf->clear();
+    auto* old = stagedOverdubBuffer.exchange(buf, std::memory_order_release);
+    delete old;
+}
+
+void Channel::undoLastOverdub()
+{
+    if (overdubLayers.empty()) return;
+
+    const auto cur = state.load(std::memory_order_relaxed);
+    if (cur == ChannelState::Overdubbing &&
+        activeOverdubLayerIdx == static_cast<int>(overdubLayers.size()) - 1)
+    {
+        // Cancel active overdub -> revert to Playing
+        activeOverdubLayerIdx = -1;
+        overdubLayers.pop_back();
+        state.store(ChannelState::Playing, std::memory_order_release);
+    }
+    else if (cur != ChannelState::Overdubbing)
+    {
+        // Remove last completed overdub layer
+        overdubLayers.pop_back();
+    }
+}
+
+bool Channel::loadOverdubLayer(const juce::AudioBuffer<float>& source, juce::int64 numSamples)
+{
+    if (numSamples <= 0 || source.getNumChannels() < 2) return false;
+
+    overdubLayers.emplace_back(2, static_cast<int>(numSamples));
+    auto& layer = overdubLayers.back();
+    for (int ch = 0; ch < 2; ++ch)
+        layer.copyFrom(ch, 0, source, ch, 0, static_cast<int>(numSamples));
+
+    return true;
+}
+
+//==============================================================================
 bool Channel::shouldMonitor() const
 {
     const auto mode = monitorMode.load(std::memory_order_relaxed);
