@@ -12,13 +12,10 @@
  * @brief Show & Song management panel
  *
  * Layout (horizontal bar):
- *   [Load Show] [Show Name]  |  [◀ Prev] [Song N/M: SongName] [Next ▶]  |  [Load Song] [Save Song]
+ *   [Load] [Show Name]  |  [< Prev] [Song N/M: SongName] [Next >]  |  [Save] [+ Show]
  *
- * Features:
- * - Load/save show (collection of songs)
- * - Navigate between songs in show with Prev/Next (MIDI-mappable via MidiLearnManager)
- * - Load/save individual song
- * - Shows current song name and position in show
+ * Load button context menu: Load Show, Load Song, Load Song Template
+ * Save button context menu: Save Show, Save Song, Save Song Template
  */
 class ShowComponent : public juce::Component,
                       private juce::Timer
@@ -51,8 +48,8 @@ private:
 
     //==========================================================================
     // Show controls
-    juce::TextButton loadShowButton {"Load Show"};
-    juce::TextButton saveShowButton {"Save Show"};
+    juce::TextButton loadButton {"Load"};
+    juce::TextButton saveButton {"Save"};
     juce::Label      showNameLabel;
 
     // Song navigation
@@ -61,8 +58,6 @@ private:
     juce::Label      songPositionLabel;  // "Song 2/5: My Song"
 
     // Individual song controls
-    juce::TextButton loadSongButton  {"Load Song"};
-    juce::TextButton saveSongButton  {"Save Song"};
     juce::TextButton addToShowButton {"+ Show"};
 
     // File chooser (must outlive dialog)
@@ -72,6 +67,10 @@ private:
     void timerCallback() override;
     void updateSongPositionLabel();
 
+    // Context menu handlers
+    void showLoadMenu();
+    void showSaveMenu();
+
     void loadShowClicked();
     void saveShowClicked();
     void prevSongClicked();
@@ -79,6 +78,8 @@ private:
     void showMidiContextMenu(MidiControlTarget target);
     void loadSongClicked();
     void saveSongClicked();
+    void loadSongTemplateClicked();
+    void saveSongTemplateClicked();
     void addToShowClicked();
 
     bool loadAndApplySong(int showSongIndex);

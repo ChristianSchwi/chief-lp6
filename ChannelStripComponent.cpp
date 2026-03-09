@@ -138,6 +138,26 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
         addAndMakeVisible(muteGroupButtons[g]);
     }
 
+    // One-shot button
+    oneShotButton.setClickingTogglesState(true);
+    oneShotButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::cyan);
+    oneShotButton.setTooltip("One-shot: channel stops automatically after one full loop playback.");
+    oneShotButton.onClick = [this]
+    {
+        auto* channel = audioEngine.getChannel(channelIndex);
+        if (channel) channel->setOneShot(oneShotButton.getToggleState());
+    };
+    addAndMakeVisible(oneShotButton);
+
+    // Open file button
+    openFileButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
+    openFileButton.setTooltip("Import an audio file (WAV/AIFF/FLAC/MP3) into this channel's loop.");
+    openFileButton.onClick = [this] { openFileClicked(); };
+    addAndMakeVisible(openFileButton);
+
+    addAndMakeVisible(inputMeter);
+    addAndMakeVisible(loopMeter);
+
     updateMainButton();
     startTimer(100);  // 10 Hz
 }
@@ -162,6 +182,28 @@ void ChannelStripComponent::paint(juce::Graphics& g)
     {
         g.setColour(juce::Colours::darkgrey);
         g.drawRect(getLocalBounds(), 1);
+    }
+
+    // Mute group section header
+    if (muteGrpHeaderY > 0)
+    {
+        const int margin = 6;
+        const int headerH = 14;
+        const int ruleY = muteGrpHeaderY + headerH / 2;
+        const auto ruleColour = juce::Colour(0xFF555555);
+        const auto bgColour = juce::Colour(0xFF2A2A2A);
+        const char* label = "MUTE GRP";
+
+        g.setFont(juce::Font(9.5f, juce::Font::bold));
+        g.setColour(ruleColour);
+        g.drawHorizontalLine(ruleY, (float)margin, (float)(getWidth() - margin));
+
+        const int textW = g.getCurrentFont().getStringWidth(label) + 8;
+        const juce::Rectangle<int> badge(margin + 4, muteGrpHeaderY, textW, headerH);
+        g.setColour(bgColour);
+        g.fillRect(badge);
+        g.setColour(ruleColour);
+        g.drawText(label, badge, juce::Justification::centredLeft, false);
     }
 }
 
@@ -191,18 +233,30 @@ void ChannelStripComponent::resized()
     soloButton.setBounds(msRow.reduced(2));
     area.removeFromTop(2);
 
-    // Mute group assignment
-    auto mgRow = area.removeFromTop(20);
-    const int mgW = mgRow.getWidth() / 4;
-    for (int g = 0; g < 4; ++g)
-        muteGroupButtons[g].setBounds(mgRow.removeFromLeft(mgW).reduced(1));
-    area.removeFromTop(2);
-
     // Monitor mode
     monitorModeBox.setBounds(area.removeFromTop(22));
     area.removeFromTop(2);
 
-    // Gain slider fills remaining space
+    // Reserve bottom for FILE + 1x + mute group section
+    openFileButton.setBounds(area.removeFromBottom(26).reduced(1));
+    area.removeFromBottom(2);
+    oneShotButton.setBounds(area.removeFromBottom(26).reduced(1));
+    area.removeFromBottom(2);
+
+    // Reserve bottom for mute group section: 14px header + 4px gap + 20px buttons = 38px
+    auto muteGrpArea = area.removeFromBottom(38);
+    muteGrpHeaderY = muteGrpArea.getY();
+    muteGrpArea.removeFromTop(18); // 14px header + 4px gap
+    const int mgW = muteGrpArea.getWidth() / 4;
+    for (int g = 0; g < 4; ++g)
+        muteGroupButtons[g].setBounds(muteGrpArea.removeFromLeft(mgW).reduced(1));
+
+    // Gain slider + meters fill remaining space
+    auto meterArea = area.removeFromRight(38); // 16px + 2px + 16px + 2px + 2px margin
+    meterArea.removeFromRight(2);
+    loopMeter .setBounds(meterArea.removeFromRight(16));
+    meterArea.removeFromRight(2);
+    inputMeter.setBounds(meterArea.removeFromRight(16));
     gainSlider.setBounds(area);
 }
 
@@ -252,6 +306,9 @@ void ChannelStripComponent::timerCallback()
     muteButton.setToggleState(channel->isMuted(), juce::dontSendNotification);
     soloButton.setToggleState(channel->isSolo(),  juce::dontSendNotification);
 
+    // Sync one-shot button
+    oneShotButton.setToggleState(channel->isOneShot(), juce::dontSendNotification);
+
     // Sync mute group buttons
     const int currentGroup = audioEngine.getChannelMuteGroup(channelIndex);
     for (int g = 0; g < 4; ++g)
@@ -296,6 +353,10 @@ void ChannelStripComponent::timerCallback()
         stateLabel.setText(stateText, juce::dontSendNotification);
     }
 
+    // Update level meters
+    inputMeter.setLevel(juce::jmax(channel->getInputPeakL(), channel->getInputPeakR()));
+    loopMeter .setLevel(juce::jmax(channel->getLoopPeakL(),  channel->getLoopPeakR()));
+
     // Repaint border when active state changes
     repaint();
 }
@@ -313,6 +374,16 @@ void ChannelStripComponent::updateMainButton()
         mainButton.setButtonText("REC");
         mainButton.setColour(juce::TextButton::buttonColourId,
                              blinkOn ? juce::Colours::red : juce::Colour(0xFF550000));
+        return;
+    }
+
+    // Pending section record-ahead: blink while queued
+    if (audioEngine.getPendingSectionRecordChannel() == channelIndex)
+    {
+        const bool blinkOn = (juce::Time::getMillisecondCounter() / 300) % 2 == 0;
+        mainButton.setButtonText("PEND REC");
+        mainButton.setColour(juce::TextButton::buttonColourId,
+                             blinkOn ? juce::Colour(0xFFAA4400) : juce::Colour(0xFF663300));
         return;
     }
 
@@ -345,6 +416,12 @@ void ChannelStripComponent::updateMainButton()
     const auto   state       = channel->getState();
     const bool   hasLoop     = channel->hasLoop();
 
+    // When a section switch is pending (latch mode), show what the button will do
+    // in the NEW section — if the channel has no content there, show REC
+    const int pendingSec = audioEngine.getPendingSection();
+    const bool showNextSectionAction = (pendingSec >= 0 && audioEngine.isLatchMode());
+    const bool hasLoopInPendingSec = showNextSectionAction && channel->sectionHasContent(pendingSec);
+
     juce::String label;
     juce::Colour colour;
 
@@ -372,7 +449,7 @@ void ChannelStripComponent::updateMainButton()
         label  = "STOP REC";
         colour = juce::Colour(0xFF8B0000);  // dark red
     }
-    else if (!hasLoop)
+    else if (!hasLoop || (showNextSectionAction && !hasLoopInPendingSec))
     {
         label  = "REC";
         colour = juce::Colours::red;
@@ -397,6 +474,16 @@ void ChannelStripComponent::mainButtonClicked()
     auto* channel = audioEngine.getChannel(channelIndex);
     if (!channel) return;
 
+    // Set as active channel on button press
+    audioEngine.setActiveChannel(channelIndex);
+
+    // Cancel pending section record-ahead on second press
+    if (audioEngine.getPendingSectionRecordChannel() == channelIndex)
+    {
+        audioEngine.cancelPendingSectionRecord();
+        return;
+    }
+
     // Cancel pending latch action on second press
     if (channel->hasPendingRecord() || channel->hasPendingOverdub() ||
         channel->hasPendingPlay()   || channel->hasPendingStop())
@@ -412,8 +499,23 @@ void ChannelStripComponent::mainButtonClicked()
     const auto state       = channel->getState();
     const bool hasLoop     = channel->hasLoop();
 
-    // Set as active channel on button press
-    audioEngine.setActiveChannel(channelIndex);
+    // Latch record-ahead: if a section switch is pending and channel has no content
+    // in the pending section, queue recording for when the section activates
+    const int pendingSec = audioEngine.getPendingSection();
+    if (pendingSec >= 0 && audioEngine.isLatchMode())
+    {
+        if (!channel->sectionHasContent(pendingSec) &&
+            (state == ChannelState::Idle || state == ChannelState::Playing))
+        {
+            audioEngine.queueRecordForPendingSection(channelIndex, false);
+            return;
+        }
+        if (overdubMode && state == ChannelState::Playing && channel->sectionHasContent(pendingSec))
+        {
+            audioEngine.queueRecordForPendingSection(channelIndex, true);
+            return;
+        }
+    }
 
     if (overdubMode && state == ChannelState::Playing)
     {
@@ -491,6 +593,142 @@ void ChannelStripComponent::gainChanged()
 {
     audioEngine.sendCommand(
         Command::setGain(channelIndex, static_cast<float>(gainSlider.getValue())));
+}
+
+void ChannelStripComponent::openFileClicked()
+{
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Import Audio File",
+        juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+        audioEngine.getFormatManager().getWildcardForAllFormats());
+
+    fileChooser->launchAsync(juce::FileBrowserComponent::openMode |
+                             juce::FileBrowserComponent::canSelectFiles,
+                             [this](const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file.existsAsFile())
+            loadAudioFile(file);
+    });
+}
+
+void ChannelStripComponent::loadAudioFile(const juce::File& file)
+{
+    auto& fm = audioEngine.getFormatManager();
+    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
+    if (!reader)
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+            "Import Error", "Could not read file: " + file.getFileName());
+        return;
+    }
+
+    const double engineSR = audioEngine.getSampleRate();
+    if (engineSR <= 0.0) return;
+
+    const juce::int64 fileLenSamples = static_cast<juce::int64>(reader->lengthInSamples);
+    if (fileLenSamples <= 0) return;
+
+    // Read file into stereo buffer
+    juce::AudioBuffer<float> fileBuffer(2, static_cast<int>(fileLenSamples));
+    reader->read(&fileBuffer, 0, static_cast<int>(fileLenSamples), 0, true, true);
+
+    // Resample if needed
+    juce::AudioBuffer<float>* srcBuffer = &fileBuffer;
+    juce::AudioBuffer<float> resampledBuffer;
+
+    if (std::abs(reader->sampleRate - engineSR) > 1.0)
+    {
+        const double ratio = reader->sampleRate / engineSR;
+        const int newLen = static_cast<int>(fileLenSamples / ratio);
+        resampledBuffer.setSize(2, newLen);
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            juce::LagrangeInterpolator interp;
+            interp.process(ratio,
+                           fileBuffer.getReadPointer(ch),
+                           resampledBuffer.getWritePointer(ch),
+                           newLen);
+        }
+        srcBuffer = &resampledBuffer;
+    }
+
+    const juce::int64 fileLen = srcBuffer->getNumSamples();
+    auto& loopEng = audioEngine.getLoopEngine();
+    juce::int64 loopLen = loopEng.getLoopLength();
+
+    // Helper lambda to finish loading with a given target length
+    auto finishLoad = [this, engineSR, fileLen, loopLen]
+                      (std::shared_ptr<juce::AudioBuffer<float>> buf, juce::int64 targetLen)
+    {
+        juce::AudioBuffer<float> finalBuffer(2, static_cast<int>(targetLen));
+        finalBuffer.clear();
+
+        const int copyLen = static_cast<int>(juce::jmin(fileLen, targetLen));
+        for (int ch = 0; ch < 2; ++ch)
+            finalBuffer.copyFrom(ch, 0, *buf, ch, 0, copyLen);
+
+        // Apply 50ms fadeout if truncating
+        if (fileLen > targetLen)
+        {
+            const int fadeSamples = juce::jmin(static_cast<int>(engineSR * 0.05),
+                                               static_cast<int>(targetLen));
+            const int fadeStart = static_cast<int>(targetLen) - fadeSamples;
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                float* data = finalBuffer.getWritePointer(ch);
+                for (int i = 0; i < fadeSamples; ++i)
+                    data[fadeStart + i] *= static_cast<float>(fadeSamples - i) / static_cast<float>(fadeSamples);
+            }
+        }
+
+        auto* channel = audioEngine.getChannel(channelIndex);
+        if (!channel) return;
+
+        audioEngine.sendCommand(Command::stopPlayback(channelIndex));
+        juce::Thread::sleep(20);
+
+        channel->loadLoopData(finalBuffer, targetLen);
+
+        if (loopLen == 0 || targetLen > loopLen)
+        {
+            audioEngine.getLoopEngine().setLoopLength(targetLen);
+            const int activeSec = audioEngine.getActiveSection();
+            audioEngine.setSectionLoopLength(activeSec, targetLen);
+        }
+
+        if (audioEngine.isPlaying())
+            audioEngine.sendCommand(Command::startPlayback(channelIndex));
+    };
+
+    // Wrap buffer in shared_ptr for async callback
+    auto sharedBuf = std::make_shared<juce::AudioBuffer<float>>(std::move(*srcBuffer));
+
+    if (loopLen == 0)
+    {
+        finishLoad(sharedBuf, fileLen);
+    }
+    else if (loopLen < fileLen)
+    {
+        auto opts = juce::MessageBoxOptions()
+            .withIconType(juce::MessageBoxIconType::QuestionIcon)
+            .withTitle("Extend Loop?")
+            .withMessage("The audio file is longer than the current loop.\n"
+                         "Extend the loop to fit, or truncate the file?")
+            .withButton("Extend")
+            .withButton("Truncate");
+
+        juce::AlertWindow::showAsync(opts,
+            [finishLoad, sharedBuf, fileLen, loopLen](int result)
+            {
+                finishLoad(sharedBuf, result == 1 ? fileLen : loopLen);
+            });
+    }
+    else
+    {
+        finishLoad(sharedBuf, loopLen);
+    }
 }
 
 void ChannelStripComponent::monitorModeChanged()

@@ -34,6 +34,8 @@
             file="MainComponent.h"/>
       <FILE id="iMNjON" name="Metronome.cpp" compile="1" resource="0" file="Metronome.cpp"/>
       <FILE id="ktRdub" name="Metronome.h" compile="0" resource="0" file="Metronome.h"/>
+      <FILE id="MtRout" name="MetronomeRoutingComponent.h" compile="0" resource="0"
+            file="MetronomeRoutingComponent.h"/>
       <FILE id="lF67FX" name="MidiLearnManager.cpp" compile="1" resource="0"
             file="MidiLearnManager.cpp"/>
       <FILE id="LtpVRL" name="MidiLearnManager.h" compile="0" resource="0"

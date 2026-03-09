@@ -2,7 +2,9 @@
 
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "SongManager.h"
 #include "ContextMenuControls.h"
+#include "CustomLookAndFeel.h"
 
 /**
  * @file TransportComponent.h
@@ -72,8 +74,7 @@ private:
     juce::ToggleButton metronomeMuteButton{"Mute"};
     juce::Label        beatsPerBarLabel   {"", "Beats:"};
     juce::Slider       beatsPerBarSlider;
-    juce::Label        metroOutLabel      {"", "Metro Out:"};
-    juce::ComboBox     metroOutputBox;
+    juce::TextButton   metroIOButton      {"I/O"};
     juce::Label        metroGainLabel     {"", "Volume:"};
     juce::Slider       metroGainSlider;
 
@@ -91,28 +92,31 @@ private:
     //==========================================================================
     // Fixed-Length Recording
     juce::Label      fixedLenLabel    {"", "Fix len:"};
-    juce::TextEditor fixedLenEditor;
-    juce::Label      fixedLenBarsLabel{"", "bars"};
-    juce::TextButton fixedLenPlusBtn  {"+"};
-    juce::TextButton fixedLenMinusBtn {"-"};
+    juce::Slider     fixedLenSlider;
 
     //==========================================================================
     // Loop manipulation
     ContextMenuButton doubleLoopButton{"Double Loop"};
 
+    // Master Recording
+    ContextMenuToggleButton masterRecordButton {"Rec Master"};
+
     // Reset Song
     juce::TextButton resetSongButton{"Reset Song"};
+
+    //==========================================================================
+    // A/B/C Sections
+    std::array<ContextMenuButton, 3> sectionButtons;
 
     //==========================================================================
     // Mute Groups
     std::array<ContextMenuButton, 4> muteGroupToggleButtons;
 
     //==========================================================================
+    FilledBarSliderLookAndFeel filledBarLnF;
+
     bool lastHasRecordings { false };
     std::vector<juce::int64> tapTimes;
-
-    struct MetroOutEntry { int left; int right; };
-    juce::Array<MetroOutEntry> metroOutEntries;
 
     void timerCallback() override;
     void updateDisplay();
@@ -130,15 +134,13 @@ private:
     void metronomeChanged();
     void metronomeMuteChanged();
     void beatsPerBarChanged();
-    void metroOutputChanged();
     void metroGainChanged();
     void autoStartChanged();
     void autoStartThresholdChanged();
     void countInChanged();
-    void applyFixedLenEditor();
-    void fixedLenStep(int direction);
+    void fixedLenSliderChanged();
     void resetSongClicked();
-    void populateMetroOutputBox();
+    void masterRecordClicked();
     void masterGainChanged();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportComponent)

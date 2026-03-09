@@ -51,6 +51,7 @@ private:
     juce::TextButton helpButton           {"? Help"};
     juce::Image      logo;
     juce::Rectangle<int> logoArea;
+    juce::Rectangle<int> progressBarArea; // 8px bar below channels showing loop progress
 
     juce::TooltipWindow tooltipWindow {this, 600};  // 600 ms hover delay
 

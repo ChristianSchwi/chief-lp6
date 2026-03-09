@@ -1,4 +1,5 @@
 #include "TransportComponent.h"
+#include "MetronomeRoutingComponent.h"
 
 //==============================================================================
 TransportComponent::TransportComponent(AudioEngine& engine)
@@ -62,12 +63,14 @@ TransportComponent::TransportComponent(AudioEngine& engine)
 
     //--------------------------------------------------------------------------
     // BPM
-    bpmLabel.setJustificationType(juce::Justification::centredRight);
+    bpmLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(bpmLabel);
 
     bpmEditor.setInputRestrictions(6, "0123456789.");
-    bpmEditor.setText(juce::String(audioEngine.getLoopEngine().getBPM(), 1), juce::dontSendNotification);
     bpmEditor.setJustification(juce::Justification::centred);
+    bpmEditor.setFont(juce::Font(36.0f, juce::Font::bold));
+    bpmEditor.setText(juce::String(audioEngine.getLoopEngine().getBPM(), 1), juce::dontSendNotification);
+    bpmEditor.applyFontToAllText(juce::Font(20.0f, juce::Font::bold), true);
     bpmEditor.onReturnKey = [this] { bpmChanged(); };
     bpmEditor.onFocusLost = [this] { bpmChanged(); };
     addAndMakeVisible(bpmEditor);
@@ -112,7 +115,7 @@ TransportComponent::TransportComponent(AudioEngine& engine)
 
     //--------------------------------------------------------------------------
     // Beats per bar
-    beatsPerBarLabel.setJustificationType(juce::Justification::centredRight);
+    beatsPerBarLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(beatsPerBarLabel);
 
     beatsPerBarSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -124,14 +127,24 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     beatsPerBarSlider.onValueChange = [this] { beatsPerBarChanged(); };
     addAndMakeVisible(beatsPerBarSlider);
 
-    // Output selector
-    metroOutLabel.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(metroOutLabel);
-    metroOutputBox.onChange = [this] { metroOutputChanged(); };
-    addAndMakeVisible(metroOutputBox);
+    // Metro I/O button
+    metroIOButton.setTooltip("Configure metronome output routing");
+    metroIOButton.onClick = [this]
+    {
+        auto* dlg = new MetronomeRoutingComponent(audioEngine);
+        juce::DialogWindow::LaunchOptions opts;
+        opts.content.setOwned(dlg);
+        opts.dialogTitle = "Metronome Output";
+        opts.dialogBackgroundColour = juce::Colours::darkgrey;
+        opts.escapeKeyTriggersCloseButton = true;
+        opts.useNativeTitleBar = false;
+        opts.resizable = false;
+        opts.launchAsync();
+    };
+    addAndMakeVisible(metroIOButton);
 
     // Volume
-    metroGainLabel.setJustificationType(juce::Justification::centredRight);
+    metroGainLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(metroGainLabel);
 
     metroGainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -141,10 +154,6 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     metroGainSlider.setTooltip("Metronome click volume (0 = silent, 1 = full).");
     metroGainSlider.onValueChange = [this] { metroGainChanged(); };
     addAndMakeVisible(metroGainSlider);
-    // FIX: populateMetroOutputBox() wird NICHT hier aufgerufen —
-    //      Audio ist zu diesem Zeitpunkt noch nicht initialisiert.
-    //      Stattdessen: refreshAfterAudioInit() aus MainComponent aufrufen.
-
     //--------------------------------------------------------------------------
     // Auto-Start
     autoStartButton.setToggleState(false, juce::dontSendNotification);
@@ -155,7 +164,7 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     autoStartButton.onClick = [this] { autoStartChanged(); };
     addAndMakeVisible(autoStartButton);
 
-    autoStartThreshLabel.setJustificationType(juce::Justification::centredRight);
+    autoStartThreshLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(autoStartThreshLabel);
 
     autoStartSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -168,7 +177,7 @@ TransportComponent::TransportComponent(AudioEngine& engine)
 
     //--------------------------------------------------------------------------
     // Count-In
-    countInLabel.setJustificationType(juce::Justification::centredRight);
+    countInLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(countInLabel);
 
     countInBox.addItem("Off",    1);   // 0 bars
@@ -184,27 +193,28 @@ TransportComponent::TransportComponent(AudioEngine& engine)
 
     //--------------------------------------------------------------------------
     // Fixed-Length Recording
-    fixedLenLabel.setJustificationType(juce::Justification::centredRight);
+    fixedLenLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(fixedLenLabel);
 
-    fixedLenEditor.setInputRestrictions(4, "0123456789");
-    fixedLenEditor.setText("0", juce::dontSendNotification);
-    fixedLenEditor.setJustification(juce::Justification::centred);
-    fixedLenEditor.setTooltip("Auto-stop recording after this many bars (0 = off, metronome mode only).");
-    fixedLenEditor.onReturnKey  = [this] { applyFixedLenEditor(); };
-    fixedLenEditor.onFocusLost  = [this] { applyFixedLenEditor(); };
-    addAndMakeVisible(fixedLenEditor);
-
-    fixedLenBarsLabel.setJustificationType(juce::Justification::centredLeft);
-    addAndMakeVisible(fixedLenBarsLabel);
-
-    fixedLenPlusBtn.setTooltip("Increase fixed length");
-    fixedLenPlusBtn.onClick = [this] { fixedLenStep(+1); };
-    addAndMakeVisible(fixedLenPlusBtn);
-
-    fixedLenMinusBtn.setTooltip("Decrease fixed length");
-    fixedLenMinusBtn.onClick = [this] { fixedLenStep(-1); };
-    addAndMakeVisible(fixedLenMinusBtn);
+    fixedLenSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    fixedLenSlider.setRange(0.0, 7.0, 1.0);
+    fixedLenSlider.setValue(0.0, juce::dontSendNotification);
+    fixedLenSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    fixedLenSlider.setTooltip("Fixed recording length in bars (0 = off). Metronome mode only.");
+    fixedLenSlider.onValueChange = [this] { fixedLenSliderChanged(); };
+    fixedLenSlider.textFromValueFunction = [](double val) {
+        static const int steps[] = {0, 1, 2, 4, 8, 16, 32, 64};
+        int idx = juce::jlimit(0, 7, (int)val);
+        return juce::String(steps[idx]) + " bars";
+    };
+    fixedLenSlider.valueFromTextFunction = [](const juce::String& text) {
+        static const int steps[] = {0, 1, 2, 4, 8, 16, 32, 64};
+        int v = text.getIntValue();
+        for (int i = 7; i >= 0; --i)
+            if (steps[i] <= v) return (double)i;
+        return 0.0;
+    };
+    addAndMakeVisible(fixedLenSlider);
 
     //--------------------------------------------------------------------------
     // Double Loop
@@ -213,10 +223,33 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     addAndMakeVisible(doubleLoopButton);
 
     //--------------------------------------------------------------------------
+    // Master Recording
+    masterRecordButton.setToggleState(false, juce::dontSendNotification);
+    masterRecordButton.setColour(juce::ToggleButton::tickColourId, juce::Colours::red);
+    masterRecordButton.setTooltip("Record master output (all channels, no metronome) to WAV file.");
+    masterRecordButton.onClick = [this] { masterRecordClicked(); };
+    addAndMakeVisible(masterRecordButton);
+
+    //--------------------------------------------------------------------------
     // Reset Song
     resetSongButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
     resetSongButton.onClick = [this] { resetSongClicked(); };
     addAndMakeVisible(resetSongButton);
+
+    //--------------------------------------------------------------------------
+    // A/B/C Sections
+    {
+        static const char* labels[] = { "A", "B", "C" };
+        for (int s = 0; s < 3; ++s)
+        {
+            sectionButtons[s].setButtonText(labels[s]);
+            sectionButtons[s].setClickingTogglesState(false);
+            sectionButtons[s].setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFF2266AA));
+            sectionButtons[s].setTooltip("Switch to section " + juce::String(labels[s]));
+            sectionButtons[s].onClick = [this, s] { audioEngine.setActiveSection(s); };
+            addAndMakeVisible(sectionButtons[s]);
+        }
+    }
 
     //--------------------------------------------------------------------------
     // Mute Groups
@@ -233,26 +266,42 @@ TransportComponent::TransportComponent(AudioEngine& engine)
         addAndMakeVisible(muteGroupToggleButtons[g]);
     }
 
+    // Apply custom slider look-and-feel
+    masterGainSlider .setLookAndFeel(&filledBarLnF);
+    beatsPerBarSlider.setLookAndFeel(&filledBarLnF);
+    metroGainSlider  .setLookAndFeel(&filledBarLnF);
+    autoStartSlider  .setLookAndFeel(&filledBarLnF);
+    fixedLenSlider   .setLookAndFeel(&filledBarLnF);
+
     updateMetronomeButtonStates();
     startTimer(50);  // 20 Hz
 }
 
 TransportComponent::~TransportComponent()
 {
+    masterGainSlider .setLookAndFeel(nullptr);
+    beatsPerBarSlider.setLookAndFeel(nullptr);
+    metroGainSlider  .setLookAndFeel(nullptr);
+    autoStartSlider  .setLookAndFeel(nullptr);
+    fixedLenSlider   .setLookAndFeel(nullptr);
     stopTimer();
 }
 
 //==============================================================================
 void TransportComponent::refreshAfterAudioInit()
 {
-    // Jetzt kennt die AudioEngine die tatsächliche Ausgangskanal-Anzahl
-    populateMetroOutputBox();
     metroGainSlider.setValue(audioEngine.getMetronomeGain(), juce::dontSendNotification);
     masterGainSlider.setValue(audioEngine.getMasterGain(), juce::dontSendNotification);
 
-    // Restore fixed-length editor from engine value
-    fixedLenEditor.setText(juce::String(audioEngine.getFixedLengthBars()),
-                           juce::dontSendNotification);
+    // Restore fixed-length slider from engine value
+    {
+        static const int steps[] = {0, 1, 2, 4, 8, 16, 32, 64};
+        int bars = audioEngine.getFixedLengthBars();
+        int idx = 0;
+        for (int i = 7; i >= 0; --i)
+            if (steps[i] <= bars) { idx = i; break; }
+        fixedLenSlider.setValue((double)idx, juce::dontSendNotification);
+    }
 }
 
 //==============================================================================
@@ -341,46 +390,44 @@ void TransportComponent::resized()
     addSection("METRONOME");
     {
         auto row = area.removeFromTop(26);
+        metroIOButton      .setBounds(row.removeFromRight(36).reduced(0, 1));
         const int half = row.getWidth() / 2;
         metronomeButton    .setBounds(row.removeFromLeft(half));
         metronomeMuteButton.setBounds(row);
     }
     area.removeFromTop(4);
     {
-        auto row = area.removeFromTop(26);
-        bpmLabel .setBounds(row.removeFromLeft(38));
-        bpmEditor.setBounds(row.removeFromLeft(55).reduced(0, 3));
-        row.removeFromLeft(4);
-        tapButton.setBounds(row);
+        const int labelW = 65;
+        auto row = area.removeFromTop(25);
+        bpmLabel .setBounds(row.removeFromLeft(labelW));
+        tapButton.setBounds(row.removeFromRight(40).reduced(0, 1));
+        row.removeFromRight(4);
+        bpmEditor.setBounds(row);
     }
     area.removeFromTop(2);
     {
+        const int labelW = 65;
         auto row = area.removeFromTop(26);
-        beatsPerBarLabel .setBounds(row.removeFromLeft(55));
+        beatsPerBarLabel .setBounds(row.removeFromLeft(labelW));
         beatsPerBarSlider.setBounds(row);
     }
     {
+        const int labelW = 65;
         auto row = area.removeFromTop(26);
-        metroGainLabel .setBounds(row.removeFromLeft(55));
+        metroGainLabel .setBounds(row.removeFromLeft(labelW));
         metroGainSlider.setBounds(row);
     }
     {
+        const int labelW = 65;
         auto row = area.removeFromTop(26);
-        countInLabel.setBounds(row.removeFromLeft(72));
+        fixedLenLabel  .setBounds(row.removeFromLeft(labelW));
+        fixedLenSlider .setBounds(row);
+    }
+    {
+        const int labelW = 65;
+        auto row = area.removeFromTop(26);
+        countInLabel.setBounds(row.removeFromLeft(labelW));
         countInBox  .setBounds(row);
-    }
-    {
-        auto row = area.removeFromTop(26);
-        fixedLenLabel    .setBounds(row.removeFromLeft(55));
-        fixedLenEditor   .setBounds(row.removeFromLeft(40).reduced(0, 3));
-        fixedLenBarsLabel.setBounds(row.removeFromLeft(30));
-        fixedLenMinusBtn .setBounds(row.removeFromLeft(24).reduced(1, 3));
-        fixedLenPlusBtn  .setBounds(row.removeFromLeft(24).reduced(1, 3));
-    }
-    {
-        auto row = area.removeFromTop(26);
-        metroOutLabel .setBounds(row.removeFromLeft(80));
-        metroOutputBox.setBounds(row);
     }
     area.removeFromTop(6);
 
@@ -393,9 +440,11 @@ void TransportComponent::resized()
     autoStartButton.setBounds(area.removeFromTop(24));
     {
         auto row = area.removeFromTop(26);
-        autoStartThreshLabel.setBounds(row.removeFromLeft(72));
+        autoStartThreshLabel.setBounds(row.removeFromLeft(65));
         autoStartSlider     .setBounds(row);
     }
+    area.removeFromTop(4);
+    masterRecordButton.setBounds(area.removeFromTop(24));
     area.removeFromTop(6);
 
     // ── UTILITY ───────────────────────────────────────────────────────────────
@@ -405,6 +454,16 @@ void TransportComponent::resized()
         const int half = row.getWidth() / 2;
         midiLearnButton .setBounds(row.removeFromLeft(half).reduced(2, 3));
         resetSongButton .setBounds(row                    .reduced(2, 3));
+    }
+    area.removeFromTop(6);
+
+    // ── SECTIONS (A/B/C) ─────────────────────────────────────────────────────
+    addSection("SECTIONS");
+    {
+        auto row = area.removeFromTop(24);
+        const int btnW = row.getWidth() / 3;
+        for (int s = 0; s < 3; ++s)
+            sectionButtons[s].setBounds(row.removeFromLeft(btnW).reduced(1, 1));
     }
     area.removeFromTop(6);
 
@@ -482,10 +541,42 @@ void TransportComponent::updateDisplay()
                                   juce::Colour(0xFF004488));
     }
 
+    // A/B/C section buttons
+    {
+        const int activeSec  = audioEngine.getActiveSection();
+        const int pendingSec = audioEngine.getPendingSection();
+        const bool blinkOn   = (juce::Time::getMillisecondCounter() / 300) % 2 == 0;
+        for (int s = 0; s < 3; ++s)
+        {
+            if (s == activeSec)
+            {
+                sectionButtons[s].setToggleState(true, juce::dontSendNotification);
+                sectionButtons[s].setColour(juce::TextButton::buttonColourId,
+                                            juce::Colour(0xFF2266AA));
+            }
+            else if (s == pendingSec)
+            {
+                sectionButtons[s].setToggleState(false, juce::dontSendNotification);
+                sectionButtons[s].setColour(juce::TextButton::buttonColourId,
+                                            blinkOn ? juce::Colour(0xFF2266AA)
+                                                    : juce::Colour(0xFF334455));
+            }
+            else
+            {
+                sectionButtons[s].setToggleState(false, juce::dontSendNotification);
+                sectionButtons[s].setColour(juce::TextButton::buttonColourId,
+                                            juce::Colour(0xFF334455));
+            }
+        }
+    }
+
     // Mute group toggle buttons
     for (int g = 0; g < 4; ++g)
         muteGroupToggleButtons[g].setToggleState(audioEngine.isMuteGroupActive(g),
                                                   juce::dontSendNotification);
+
+    // Master recording button
+    masterRecordButton.setToggleState(audioEngine.isMasterRecording(), juce::dontSendNotification);
 }
 
 void TransportComponent::updateMetronomeButtonStates()
@@ -513,9 +604,7 @@ void TransportComponent::updateMetronomeButtonStates()
 
     // Fixed-length: only active when metronome is on and no recordings yet
     const bool fixedLenActive = metroEnabled && !hasRecordings;
-    fixedLenEditor  .setEnabled(fixedLenActive);
-    fixedLenPlusBtn .setEnabled(fixedLenActive);
-    fixedLenMinusBtn.setEnabled(fixedLenActive);
+    fixedLenSlider.setEnabled(fixedLenActive);
 }
 
 //==============================================================================
@@ -596,14 +685,6 @@ void TransportComponent::beatsPerBarChanged()
     countInChanged();
 }
 
-void TransportComponent::metroOutputChanged()
-{
-    const int id = metroOutputBox.getSelectedId();
-    if (id < 1 || id > metroOutEntries.size()) return;
-    const auto& entry = metroOutEntries.getReference(id - 1);
-    audioEngine.setMetronomeOutput(entry.left, entry.right);
-}
-
 void TransportComponent::metroGainChanged()
 {
     audioEngine.setMetronomeGain(static_cast<float>(metroGainSlider.getValue()));
@@ -632,36 +713,11 @@ void TransportComponent::countInChanged()
     audioEngine.setCountInBeats(beats);
 }
 
-void TransportComponent::applyFixedLenEditor()
-{
-    const int val = juce::jlimit(0, 9999, fixedLenEditor.getText().getIntValue());
-    audioEngine.setFixedLengthBars(val);
-    fixedLenEditor.setText(juce::String(val), juce::dontSendNotification);
-}
-
-void TransportComponent::fixedLenStep(int direction)
+void TransportComponent::fixedLenSliderChanged()
 {
     static const int steps[] = {0, 1, 2, 4, 8, 16, 32, 64};
-    static const int nSteps  = (int)std::size(steps);
-
-    const int current = audioEngine.getFixedLengthBars();
-    int newVal = current;
-
-    if (direction > 0)
-    {
-        // First step strictly greater than current
-        for (int i = 0; i < nSteps; ++i)
-            if (steps[i] > current) { newVal = steps[i]; break; }
-    }
-    else
-    {
-        // Last step strictly less than current
-        for (int i = nSteps - 1; i >= 0; --i)
-            if (steps[i] < current) { newVal = steps[i]; break; }
-    }
-
-    audioEngine.setFixedLengthBars(newVal);
-    fixedLenEditor.setText(juce::String(newVal), juce::dontSendNotification);
+    int idx = juce::jlimit(0, 7, (int)fixedLenSlider.getValue());
+    audioEngine.setFixedLengthBars(steps[idx]);
 }
 
 void TransportComponent::resetSongClicked()
@@ -713,6 +769,9 @@ void TransportComponent::mouseDown(const juce::MouseEvent& e)
     else if (hit(tapButton))         showMidiContextMenu(MidiControlTarget::TapTempo);
     else if (hit(masterGainSlider))  showMidiContextMenu(MidiControlTarget::MasterGain);
     else if (hit(doubleLoopButton))  showMidiContextMenu(MidiControlTarget::DoubleLoopLength);
+    else if (hit(sectionButtons[0])) showMidiContextMenu(MidiControlTarget::SectionA);
+    else if (hit(sectionButtons[1])) showMidiContextMenu(MidiControlTarget::SectionB);
+    else if (hit(sectionButtons[2])) showMidiContextMenu(MidiControlTarget::SectionC);
     else if (hit(muteGroupToggleButtons[0])) showMidiContextMenu(MidiControlTarget::MuteGroupToggle1);
     else if (hit(muteGroupToggleButtons[1])) showMidiContextMenu(MidiControlTarget::MuteGroupToggle2);
     else if (hit(muteGroupToggleButtons[2])) showMidiContextMenu(MidiControlTarget::MuteGroupToggle3);
@@ -777,44 +836,22 @@ void TransportComponent::showMidiButtonMenu()
     });
 }
 
+void TransportComponent::masterRecordClicked()
+{
+    if (audioEngine.isMasterRecording())
+    {
+        audioEngine.stopMasterRecording();
+    }
+    else
+    {
+        auto dir = SongManager::getCurrentSongDirectory();
+        if (!audioEngine.startMasterRecording(dir))
+            DBG("Master recording failed to start");
+    }
+}
+
 void TransportComponent::masterGainChanged()
 {
     audioEngine.setMasterGain(static_cast<float>(masterGainSlider.getValue()));
 }
 
-void TransportComponent::populateMetroOutputBox()
-{
-    // Remember current routing so we can restore the selection after repopulating.
-    const int curL = audioEngine.getMetronome().getOutputLeft();
-    const int curR = audioEngine.getMetronome().getOutputRight();
-
-    metroOutEntries.clear();
-    metroOutputBox.clear(juce::dontSendNotification);
-
-    // getNumOutputChannels() is correctly set after initialiseAudio()
-    const int numOut = juce::jmax(2, audioEngine.getNumOutputChannels());
-    int id        = 1;
-    int selectedId = 1;  // fallback: first entry
-
-    // --- Stereo pairs ---
-    for (int i = 0; i + 1 < numOut; i += 2)
-    {
-        metroOutEntries.add({ i, i + 1 });
-        metroOutputBox.addItem("Out " + juce::String(i + 1) + "/" + juce::String(i + 2), id);
-        if (i == curL && i + 1 == curR)
-            selectedId = id;
-        ++id;
-    }
-
-    // --- Individual channels (mono: L = R) ---
-    for (int i = 0; i < numOut; ++i)
-    {
-        metroOutEntries.add({ i, i });
-        metroOutputBox.addItem("Out " + juce::String(i + 1) + " (mono)", id);
-        if (i == curL && i == curR)
-            selectedId = id;
-        ++id;
-    }
-
-    metroOutputBox.setSelectedId(selectedId, juce::dontSendNotification);
-}

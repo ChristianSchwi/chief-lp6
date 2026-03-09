@@ -570,6 +570,16 @@ void MidiLearnManager::applyMapping(const MidiMapping& m, const juce::MidiMessag
             if (norm >= 0.5f) audioEngine.doubleLoopLength();
             return;
 
+        case MidiControlTarget::SectionA:
+            if (norm >= 0.5f) audioEngine.setActiveSection(0);
+            return;
+        case MidiControlTarget::SectionB:
+            if (norm >= 0.5f) audioEngine.setActiveSection(1);
+            return;
+        case MidiControlTarget::SectionC:
+            if (norm >= 0.5f) audioEngine.setActiveSection(2);
+            return;
+
         default:
             return;
     }
@@ -911,6 +921,9 @@ juce::String MidiLearnManager::targetName(MidiControlTarget t)
         case MidiControlTarget::TapTempo:            return "Tap Tempo";
         case MidiControlTarget::MasterGain:          return "Master Volume";
         case MidiControlTarget::DoubleLoopLength:    return "Double Loop Length";
+        case MidiControlTarget::SectionA:            return "Section A";
+        case MidiControlTarget::SectionB:            return "Section B";
+        case MidiControlTarget::SectionC:            return "Section C";
         default:                                     return "Unknown";
     }
 }

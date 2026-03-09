@@ -142,6 +142,32 @@ void MainComponent::paint(juce::Graphics& g)
         g.drawImage(logo, logoArea.toFloat(),
                     juce::RectanglePlacement::centred |
                     juce::RectanglePlacement::onlyReduceInSize);
+
+    // --- Loop progress bar ---
+    if (!progressBarArea.isEmpty())
+    {
+        auto& le = audioEngine.getLoopEngine();
+        const juce::int64 loopLen = le.getLoopLength();
+
+        // Background
+        g.setColour(juce::Colour(0xFF1A1A1A));
+        g.fillRect(progressBarArea);
+
+        if (loopLen > 0 && audioEngine.isPlaying())
+        {
+            const juce::int64 pos = le.getCurrentPlayhead();
+            const float fraction = static_cast<float>(pos) / static_cast<float>(loopLen);
+            const int fillW = static_cast<int>(fraction * progressBarArea.getWidth());
+
+            g.setColour(juce::Colour(0xFF2288AA));
+            g.fillRect(progressBarArea.getX(), progressBarArea.getY(),
+                       fillW, progressBarArea.getHeight());
+        }
+
+        // Thin border
+        g.setColour(juce::Colour(0xFF333333));
+        g.drawRect(progressBarArea, 1);
+    }
 }
 
 void MainComponent::resized()
@@ -159,8 +185,13 @@ void MainComponent::resized()
     helpButton         .setBounds(infoRow.removeFromRight(70) .reduced(2, 2));
     infoLabel.setBounds(infoRow.reduced(4, 0));
 
-    // Remaining area: transport (left panel) + 6 channel strips
+    // Progress bar — 8px high, spans the channel area (not the transport)
+    auto progressRow = area.removeFromBottom(8);
     const int transportWidth = 220;
+    progressRow.removeFromLeft(transportWidth);  // align with channel strips
+    progressBarArea = progressRow;
+
+    // Remaining area: transport (left panel) + 6 channel strips
     transportComponent.setBounds(area.removeFromLeft(transportWidth).reduced(4));
 
     const int channelWidth = area.getWidth() / 6;
@@ -188,6 +219,10 @@ void MainComponent::updateInfoLabel()
 
 void MainComponent::timerCallback()
 {
+    // Repaint the progress bar area each tick (20 Hz)
+    if (!progressBarArea.isEmpty())
+        repaint(progressBarArea);
+
     auto& le = audioEngine.getLoopEngine();
     const bool   metroActive = audioEngine.getMetronome().getEnabled();
     const juce::int64 loopLen = le.getLoopLength();
@@ -236,7 +271,7 @@ void MainComponent::timerCallback()
         "Mode: " + juce::String(metroActive ? "Metronome" : "Free") + "  |  " +
         "Loop: " + loopStr + "  |  " +
         "Pos: " + juce::String(le.getPlayheadSeconds(), 2) + "s  |  " +
-        "CPU: " + juce::String(cpu, 1) + "%  |  " +
+        "CPU: " + juce::String(cpu, 1).paddedLeft(' ', 5) + "%  |  " +
         "MIDI: " + midiStr,
         juce::dontSendNotification);
 }
@@ -348,6 +383,13 @@ void MainComponent::triggerChannel(int channelIndex)
     auto* channel = audioEngine.getChannel(channelIndex);
     if (!channel) return;
 
+    // Cancel pending section record-ahead on second press
+    if (audioEngine.getPendingSectionRecordChannel() == channelIndex)
+    {
+        audioEngine.cancelPendingSectionRecord();
+        return;
+    }
+
     // Cancel pending latch action on second press
     if (channel->hasPendingRecord() || channel->hasPendingOverdub() ||
         channel->hasPendingPlay()   || channel->hasPendingStop())
@@ -362,6 +404,22 @@ void MainComponent::triggerChannel(int channelIndex)
     const bool overdubMode = audioEngine.isInOverdubMode();
     const auto state       = channel->getState();
     const bool hasLoop     = channel->hasLoop();
+
+    // Latch record-ahead: if a section switch is pending and user wants to record,
+    // queue the recording to start when the new section activates
+    if (audioEngine.isLatchMode() && audioEngine.getPendingSection() >= 0)
+    {
+        if (state == ChannelState::Idle && !hasLoop)
+        {
+            audioEngine.queueRecordForPendingSection(channelIndex, false);
+            return;
+        }
+        else if (overdubMode && state == ChannelState::Playing)
+        {
+            audioEngine.queueRecordForPendingSection(channelIndex, true);
+            return;
+        }
+    }
 
     if (overdubMode && state == ChannelState::Playing)
     {

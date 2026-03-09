@@ -43,7 +43,10 @@ enum class CommandType
     CancelPending,
 
     // Loop manipulation
-    DoubleLoopLength
+    DoubleLoopLength,
+
+    // Sections (A/B/C)
+    SetActiveSection
 };
 
 //==============================================================================
@@ -53,7 +56,7 @@ enum class MonitorMode { Off, AlwaysOn, WhileRecording, WhenTrackActive };
 struct RoutingConfig
 {
     int inputChannelLeft  {0};
-    int inputChannelRight {1};
+    int inputChannelRight {-1};
     int outputChannelLeft {0};
     int outputChannelRight{1};
     int midiChannelFilter {0};
@@ -135,7 +138,7 @@ struct Command
 class CommandQueue
 {
 public:
-    static constexpr int MAX_COMMANDS = 512;
+    static constexpr int MAX_COMMANDS = 2048;
     CommandQueue() : fifo(MAX_COMMANDS) { commands.resize(MAX_COMMANDS); }
 
     bool pushCommand(const Command& cmd)

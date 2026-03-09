@@ -65,7 +65,10 @@ enum class MidiControlTarget
     MuteGroupToggle4,    // toggle mute group 4 (global)
     TapTempo,            // tap tempo (global)
     MasterGain,          // master output volume (global, continuous)
-    DoubleLoopLength     // double loop length (global, trigger)
+    DoubleLoopLength,    // double loop length (global, trigger)
+    SectionA,            // switch to section A (global)
+    SectionB,            // switch to section B (global)
+    SectionC             // switch to section C (global)
 };
 
 //==============================================================================

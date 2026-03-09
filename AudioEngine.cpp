@@ -9,10 +9,14 @@
 
 AudioEngine::AudioEngine()
 {
+    formatManager.registerBasicFormats();
     loopEngine       = std::make_unique<LoopEngine>();
     metronome        = std::make_unique<Metronome>();
     pluginHost       = std::make_unique<PluginHostWrapper>();
     midiLearnManager = std::make_unique<MidiLearnManager>(*this);
+
+    for (int i = 0; i < NUM_SECTIONS; ++i)
+        sectionLoopLengths[i].store(0, std::memory_order_relaxed);
 
     for (int i = 0; i < 6; ++i)
     {
@@ -25,6 +29,9 @@ AudioEngine::AudioEngine()
 
 AudioEngine::~AudioEngine()
 {
+    if (masterRecordingActive.load(std::memory_order_relaxed))
+        stopMasterRecording();
+
     const auto midiInputs = juce::MidiInput::getAvailableDevices();
     for (const auto& device : midiInputs)
         deviceManager.setMidiInputDeviceEnabled(device.identifier, false);
@@ -171,6 +178,9 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     inputBuffer .setSize(numInputChannels,  currentBufferSize * 2);
     outputBuffer.setSize(numOutputChannels, currentBufferSize * 2);
 
+    // Master recording buffer (stereo)
+    masterRecordBuffer.setSize(2, currentBufferSize * 2);
+
     // Prepare channels (max loop = 10 min)
     const juce::int64 maxLoopSamples = static_cast<juce::int64>(600.0 * currentSampleRate);
     for (auto& ch : channels)
@@ -184,6 +194,9 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 
 void AudioEngine::audioDeviceStopped()
 {
+    if (masterRecordingActive.load(std::memory_order_relaxed))
+        stopMasterRecording();
+
     isPlayingFlag.store(false, std::memory_order_release);
     for (auto& ch : channels)
         if (ch) ch->releaseResources();
@@ -241,11 +254,63 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
             const juce::int64 offset = barEndPlayheadOffset;
             barEndPlayheadOffset = 0;
             loopEngine->setLoopLength(barEndTargetSample);
+            sectionLoopLengths[activeGlobalSection.load(std::memory_order_relaxed)]
+                .store(barEndTargetSample, std::memory_order_release);
             loopEngine->setPlayhead(offset);   // 0 = normal, >0 = seamless snap-back
             if (pch >= 0 && pch < 6 && channels[pch])
                 channels[pch]->stopRecording();
             DBG("Metronome: loop set to " + juce::String(barEndTargetSample) +
                 " samples, playhead = " + juce::String(offset) + " samples");
+        }
+    }
+
+    //--- 3a2. PENDING SECTION SWITCH (latch mode: fires at loop boundary) -----
+    {
+        const int ps = pendingGlobalSection.load(std::memory_order_relaxed);
+        if (ps >= 0 && loopLen > 0 && playing)
+        {
+            // Fire at loop boundary: playhead wrapped in this block
+            const juce::int64 curPos = loopEngine->getCurrentPlayhead();
+            if (curPos < static_cast<juce::int64>(numSamples))
+            {
+                pendingGlobalSection.store(-1, std::memory_order_release);
+
+                // Save current loop length
+                const int curSec = activeGlobalSection.load(std::memory_order_relaxed);
+                sectionLoopLengths[curSec].store(loopLen, std::memory_order_release);
+
+                // Switch
+                activeGlobalSection.store(ps, std::memory_order_release);
+                juce::int64 newLen = sectionLoopLengths[ps].load(std::memory_order_relaxed);
+
+                // Fallback: if new section is empty, inherit loop length from previous section
+                if (newLen == 0)
+                {
+                    for (int fs = ps - 1; fs >= 0; --fs)
+                    {
+                        const juce::int64 fallbackLen = sectionLoopLengths[fs].load(std::memory_order_relaxed);
+                        if (fallbackLen > 0) { newLen = fallbackLen; break; }
+                    }
+                }
+
+                loopEngine->setLoopLength(newLen);
+                loopEngine->resetPlayhead();
+
+                // Start pending record if queued for this section switch
+                const int pendRecCh = pendingSectionRecordChannel.load(std::memory_order_relaxed);
+                if (pendRecCh >= 0)
+                {
+                    pendingSectionRecordChannel.store(-1, std::memory_order_release);
+                    if (pendRecCh < 6 && channels[pendRecCh])
+                        channels[pendRecCh]->startRecording(pendingSectionRecordIsOverdub.load(std::memory_order_relaxed));
+                }
+
+                for (auto& ch : channels)
+                    if (ch) ch->setActiveSection(ps);
+
+                DBG("Section switch (latched) -> " + juce::String(ps) +
+                    ", loopLen=" + juce::String(newLen));
+            }
         }
     }
 
@@ -258,13 +323,20 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
             pendingMetroBarEnd.store(false, std::memory_order_release);
             barEndPendingChannel.store(-1, std::memory_order_release);
             barEndSamplesRemaining = 0;
+            barEndPlayheadOffset = 0;
             const juce::int64 currentPos = loopEngine->getCurrentPlayhead();
             if (currentPos > 0)
             {
                 loopEngine->setLoopLength(currentPos);
+                sectionLoopLengths[activeGlobalSection.load(std::memory_order_relaxed)]
+                    .store(currentPos, std::memory_order_release);
                 loopEngine->resetPlayhead();
             }
         }
+
+        // Cancel pending section switch
+        pendingGlobalSection.store(-1, std::memory_order_release);
+
         for (auto& ch : channels)
         {
             if (!ch) continue;
@@ -374,6 +446,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
                         fixedLengthBars.load(std::memory_order_relaxed) *
                         metronome->getBeatsPerBar() * spb + 0.5);
                     loopEngine->setLoopLength(exactLen);
+                    sectionLoopLengths[activeGlobalSection.load(std::memory_order_relaxed)]
+                        .store(exactLen, std::memory_order_release);
                     loopEngine->resetPlayhead();
                 }
                 channels[pch2]->stopRecording();
@@ -419,6 +493,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
         }
     }
 
+    //--- 5b. MASTER RECORDING --------------------------------------------------
+    if (masterRecordingActive.load(std::memory_order_acquire))
+    {
+        masterRecordBuffer.clear();
+        for (int ch = 0; ch < numOutputChannels; ++ch)
+            if (outputChannelData[ch])
+                juce::FloatVectorOperations::add(
+                    masterRecordBuffer.getWritePointer(ch & 1),
+                    outputChannelData[ch], numSamples);
+
+        const float mg = masterGain.load(std::memory_order_relaxed);
+        if (mg != 1.0f)
+            for (int c = 0; c < 2; ++c)
+                juce::FloatVectorOperations::multiply(
+                    masterRecordBuffer.getWritePointer(c), mg, numSamples);
+
+        const float* const bufs[] = {
+            masterRecordBuffer.getReadPointer(0),
+            masterRecordBuffer.getReadPointer(1)
+        };
+        masterRecordWriter->write(bufs, numSamples);
+    }
+
     //--- 6. METRONOME ----------------------------------------------------------
     metronome->processBlock(outputChannelData,
                             numOutputChannels,
@@ -460,6 +557,8 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
         case CommandType::SetBPM:
         {
             if (hasAnyRecordings()) { DBG("SetBPM ignored: recordings exist"); break; }
+            if (pendingMetroBarEnd.load(std::memory_order_relaxed))
+            { DBG("SetBPM ignored: bar-end snap pending"); break; }
             const double bpm = static_cast<double>(cmd.floatValue);
             loopEngine->setBPM(bpm);
             metronome->setBPM(bpm);
@@ -531,16 +630,23 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
             barEndPendingChannel.store(-1, std::memory_order_release);
             barEndSamplesRemaining = 0;
             barEndTargetSample = 0;
+            barEndPlayheadOffset = 0;
             fixedLengthActive.store(false, std::memory_order_release);
             fixedLengthChannel.store(-1,   std::memory_order_release);
             fixedLengthSamplesRemaining = 0;
+            pendingGlobalSection.store(-1, std::memory_order_release);
+            pendingSectionRecordChannel.store(-1, std::memory_order_release);
             for (auto& ch : channels)
-                if (ch) ch->clearLoop();
+                if (ch) ch->clearAllSections();
+
+            activeGlobalSection.store(0, std::memory_order_release);
+            for (int s = 0; s < NUM_SECTIONS; ++s)
+                sectionLoopLengths[s].store(0, std::memory_order_release);
 
             loopEngine->setLoopLength(0);
             loopEngine->resetPlayhead();
             isPlayingFlag.store(false, std::memory_order_release);
-            DBG("Song reset: all channels cleared");
+            DBG("Song reset: all channels + sections cleared");
             break;
         }
 
@@ -550,9 +656,12 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
             barEndPendingChannel.store(-1, std::memory_order_release);
             barEndSamplesRemaining = 0;
             barEndTargetSample = 0;
+            barEndPlayheadOffset = 0;
             fixedLengthActive.store(false, std::memory_order_release);
             fixedLengthChannel.store(-1,   std::memory_order_release);
             fixedLengthSamplesRemaining = 0;
+            pendingGlobalSection.store(-1, std::memory_order_release);
+            pendingSectionRecordChannel.store(-1, std::memory_order_release);
             isPlayingFlag.store(false, std::memory_order_release);
             loopEngine->resetPlayhead();
             for (auto& ch : channels)
@@ -572,12 +681,58 @@ void AudioEngine::processGlobalCommand(const Command& cmd)
             const juce::int64 loopLen = loopEngine->getLoopLength();
             if (loopLen <= 0) break;
 
-            // Duplicate audio in every channel's buffer
+            const int curSec = activeGlobalSection.load(std::memory_order_relaxed);
             for (auto& ch : channels)
-                if (ch) ch->doubleBuffer(loopLen);
+                if (ch) ch->doubleBuffer(curSec, loopLen);
 
             loopEngine->setLoopLength(loopLen * 2);
+            sectionLoopLengths[curSec].store(loopLen * 2, std::memory_order_release);
             DBG("Loop doubled: " + juce::String(loopLen) + " -> " + juce::String(loopLen * 2));
+            break;
+        }
+
+        case CommandType::SetActiveSection:
+        {
+            const int newSec = cmd.intValue1;
+            if (newSec < 0 || newSec >= NUM_SECTIONS) break;
+
+            const int curSec = activeGlobalSection.load(std::memory_order_relaxed);
+            if (newSec == curSec) break;
+
+            // Stop any recording/overdubbing first
+            for (auto& ch : channels)
+            {
+                if (!ch) continue;
+                const auto cs = ch->getState();
+                if (cs == ChannelState::Recording || cs == ChannelState::Overdubbing)
+                    ch->stopRecording();
+            }
+
+            // Save current loop length
+            sectionLoopLengths[curSec].store(loopEngine->getLoopLength(), std::memory_order_release);
+
+            // Switch
+            activeGlobalSection.store(newSec, std::memory_order_release);
+            juce::int64 newLen = sectionLoopLengths[newSec].load(std::memory_order_relaxed);
+
+            // Fallback: if new section is empty, inherit loop length from previous section
+            if (newLen == 0)
+            {
+                for (int fs = newSec - 1; fs >= 0; --fs)
+                {
+                    const juce::int64 fallbackLen = sectionLoopLengths[fs].load(std::memory_order_relaxed);
+                    if (fallbackLen > 0) { newLen = fallbackLen; break; }
+                }
+            }
+
+            loopEngine->setLoopLength(newLen);
+            loopEngine->resetPlayhead();
+
+            for (auto& ch : channels)
+                if (ch) ch->setActiveSection(newSec);
+
+            DBG("Section switch -> " + juce::String(newSec) +
+                ", loopLen=" + juce::String(newLen));
             break;
         }
 
@@ -709,6 +864,8 @@ void AudioEngine::processChannelCommand(const Command& cmd)
                 if (recorded > 0)
                 {
                     loopEngine->setLoopLength(recorded);
+                    sectionLoopLengths[activeGlobalSection.load(std::memory_order_relaxed)]
+                        .store(recorded, std::memory_order_release);
                     DBG("Loop length from first recording: " +
                         juce::String(recorded) + " samples (" +
                         juce::String(static_cast<double>(recorded) / currentSampleRate, 2) + "s)");
@@ -731,7 +888,11 @@ void AudioEngine::processChannelCommand(const Command& cmd)
                     barEndSamplesRemaining = 0;
                     barEndPlayheadOffset = 0;
                     if (recorded > 0)
+                    {
                         loopEngine->setLoopLength(recorded);
+                        sectionLoopLengths[activeGlobalSection.load(std::memory_order_relaxed)]
+                            .store(recorded, std::memory_order_release);
+                    }
                     loopEngine->resetPlayhead();
                     channel->stopRecording();
                     DBG("Metronome bar-end cancelled — stopped immediately at " +
@@ -757,6 +918,8 @@ void AudioEngine::processChannelCommand(const Command& cmd)
                     if (completedBars >= 1 && posInBar < spbSamples)
                     {
                         loopEngine->setLoopLength(lastBarEnd);
+                        sectionLoopLengths[activeGlobalSection.load(std::memory_order_relaxed)]
+                            .store(lastBarEnd, std::memory_order_release);
                         loopEngine->setPlayhead(posInBar);   // offset so no jump in playback
                         channel->stopRecording();
                         DBG("Metronome: snap to bar end (" + juce::String(completedBars) +
@@ -898,14 +1061,23 @@ void AudioEngine::processChannelCommand(const Command& cmd)
 
         case CommandType::ClearChannel:
         {
-            channel->clearLoop();
-            // Reset loop length when all channels are empty so the next first
-            // recording can establish a fresh length (bar-rounded in metronome mode,
-            // free-form otherwise).
-            if (!hasAnyRecordings())
+            const int curSec = activeGlobalSection.load(std::memory_order_relaxed);
+            channel->clearSection(curSec);
+            // Reset this section's loop length when no channels have content in it
             {
-                loopEngine->setLoopLength(0);
-                loopEngine->resetPlayhead();
+                bool anyContent = false;
+                for (auto& ch : channels)
+                    if (ch && ch->sectionHasContent(curSec)) { anyContent = true; break; }
+                if (!anyContent)
+                {
+                    sectionLoopLengths[curSec].store(0, std::memory_order_release);
+                    // Only reset global loop engine if clearing the active section
+                    if (curSec == activeGlobalSection.load(std::memory_order_relaxed))
+                    {
+                        loopEngine->setLoopLength(0);
+                        loopEngine->resetPlayhead();
+                    }
+                }
             }
             break;
         }
@@ -936,6 +1108,14 @@ bool AudioEngine::sendCommand(const Command& cmd)
         auto* ch = getChannel(cmd.channelIndex);
         if (ch)
             ch->stageOverdubBuffer(loopEngine->getLoopLength());
+    }
+
+    // Pre-allocate active section buffer before recording
+    if (cmd.type == CommandType::StartRecord || cmd.type == CommandType::StartOverdub)
+    {
+        auto* ch = getChannel(cmd.channelIndex);
+        if (ch)
+            ch->allocateSection(ch->getActiveSection());
     }
 
     if (!commandQueue.pushCommand(cmd))
@@ -990,6 +1170,9 @@ void AudioEngine::setOverdubMode(bool enabled)
 
 void AudioEngine::emergencyStop()
 {
+    if (masterRecordingActive.load(std::memory_order_relaxed))
+        stopMasterRecording();
+
     sendCommand(Command::emergencyStop());
 }
 
@@ -1052,11 +1235,12 @@ void AudioEngine::setChannelType(int index, ChannelType type)
 
     // Wait for the audio thread to finish any in-flight processBlock() on the old
     // channel before we destroy it.  setPlaying(false) only sets a flag — the IO
-    // callback continues running.  One block period is enough.
+    // callback continues running.  Sleep for two block periods to ensure at least
+    // one full callback completes after the flag was set.
     const int blockMs = (currentBufferSize > 0 && currentSampleRate > 0)
                       ? static_cast<int>(currentBufferSize * 1000.0 / currentSampleRate) + 5
                       : 15;
-    juce::Thread::sleep(blockMs);
+    juce::Thread::sleep(blockMs * 2);
 
     // Create and fully prepare the new channel BEFORE installing it, so the audio
     // thread never encounters it with uninitialised (zero-size) buffers.
@@ -1214,6 +1398,8 @@ void AudioEngine::setMetronomeEnabled(bool enabled)
     // Always reset loop length to 0: in metronome mode the loop length is
     // determined from the first recording (rounded to full bars), not from BPM.
     loopEngine->setLoopLength(0);
+    for (int s = 0; s < NUM_SECTIONS; ++s)
+        sectionLoopLengths[s].store(0, std::memory_order_release);
 
     DBG("Metronome " + juce::String(enabled ? "enabled" : "disabled"));
 }
@@ -1256,22 +1442,78 @@ void AudioEngine::setMasterGain(float gain)    { masterGain.store(juce::jlimit(0
 float AudioEngine::getMasterGain() const       { return masterGain.load(std::memory_order_relaxed); }
 
 //==============================================================================
+// Master Recording (Message Thread)
+//==============================================================================
+
+bool AudioEngine::startMasterRecording(const juce::File& directory)
+{
+    if (masterRecordingActive.load(std::memory_order_relaxed))
+        return false;
+
+    if (!directory.createDirectory())
+        return false;
+
+    auto filename = "master_" + juce::Time::getCurrentTime().formatted("%Y-%m-%d_%H-%M-%S") + ".wav";
+    masterRecordFile = directory.getChildFile(filename);
+
+    juce::WavAudioFormat wavFormat;
+    auto fileStream = masterRecordFile.createOutputStream();
+    if (!fileStream)
+        return false;
+
+    auto* writer = wavFormat.createWriterFor(fileStream.get(), currentSampleRate, 2, 24, {}, 0);
+    if (!writer)
+        return false;
+
+    fileStream.release();  // writer now owns the stream
+
+    masterRecordThread.startThread();
+    masterRecordWriter.reset(new juce::AudioFormatWriter::ThreadedWriter(writer, masterRecordThread, 65536));
+    masterRecordingActive.store(true, std::memory_order_release);
+    return true;
+}
+
+void AudioEngine::stopMasterRecording()
+{
+    masterRecordingActive.store(false, std::memory_order_release);
+    masterRecordWriter.reset();
+    masterRecordThread.stopThread(2000);
+}
+
+bool AudioEngine::isMasterRecording() const
+{
+    return masterRecordingActive.load(std::memory_order_relaxed);
+}
+
+juce::File AudioEngine::getMasterRecordFile() const
+{
+    return masterRecordFile;
+}
+
+//==============================================================================
 // Song Reset (Message Thread)
 //==============================================================================
 
 bool AudioEngine::hasAnyRecordings() const
 {
     for (const auto& ch : channels)
-        if (ch && ch->hasLoop())
+        if (ch && ch->hasContentInAnySection())
             return true;
     return false;
 }
 
 void AudioEngine::resetSong()
 {
+    if (masterRecordingActive.load(std::memory_order_relaxed))
+        stopMasterRecording();
+
     // Clear mute groups
     channelMuteGroup.fill(0);
     muteGroupActive.fill(false);
+
+    // Reset section state on message thread side
+    pendingGlobalSection.store(-1, std::memory_order_release);
+    pendingSectionRecordChannel.store(-1, std::memory_order_release);
 
     sendCommand(Command::resetSong());
 }
@@ -1377,4 +1619,78 @@ void AudioEngine::setChannelName(int index, const juce::String& name)
         channelNames[index] = name.trim().isEmpty()
                               ? "CH " + juce::String(index + 1)
                               : name.trim();
+}
+
+//==============================================================================
+// A/B/C Sections (Message Thread)
+//==============================================================================
+
+void AudioEngine::setActiveSection(int section)
+{
+    if (section < 0 || section >= NUM_SECTIONS) return;
+    if (section == activeGlobalSection.load(std::memory_order_relaxed))
+    {
+        // Cancel any pending latched switch and any queued record-ahead
+        pendingGlobalSection.store(-1, std::memory_order_release);
+        pendingSectionRecordChannel.store(-1, std::memory_order_release);
+        return;
+    }
+
+    // Stop any recording/overdubbing channels first
+    for (int i = 0; i < 6; ++i)
+    {
+        auto* ch = channels[i].get();
+        if (!ch) continue;
+        const auto cs = ch->getState();
+        if (cs == ChannelState::Recording || cs == ChannelState::Overdubbing)
+            sendCommand(Command::stopRecord(i));
+    }
+
+    // Pre-allocate section buffers for all channels
+    for (auto& ch : channels)
+        if (ch) ch->allocateSection(section);
+
+    const bool latch = latchMode.load(std::memory_order_relaxed);
+    const bool playing = isPlayingFlag.load(std::memory_order_relaxed);
+    const juce::int64 loopLen = loopEngine->getLoopLength();
+
+    if (latch && playing && loopLen > 0)
+    {
+        // Deferred: fires at loop boundary in audio callback
+        pendingGlobalSection.store(section, std::memory_order_release);
+    }
+    else
+    {
+        // Immediate: send command
+        Command cmd;
+        cmd.type = CommandType::SetActiveSection;
+        cmd.intValue1 = section;
+        sendCommand(cmd);
+    }
+}
+
+juce::int64 AudioEngine::getSectionLoopLength(int s) const
+{
+    if (s < 0 || s >= NUM_SECTIONS) return 0;
+    return sectionLoopLengths[s].load(std::memory_order_relaxed);
+}
+
+void AudioEngine::setSectionLoopLength(int s, juce::int64 len)
+{
+    if (s >= 0 && s < NUM_SECTIONS)
+        sectionLoopLengths[s].store(len, std::memory_order_release);
+}
+
+void AudioEngine::queueRecordForPendingSection(int channelIndex, bool isOverdub)
+{
+    if (channelIndex < 0 || channelIndex >= 6) return;
+    if (pendingGlobalSection.load(std::memory_order_relaxed) < 0) return;  // no pending section
+
+    pendingSectionRecordIsOverdub.store(isOverdub, std::memory_order_release);
+    pendingSectionRecordChannel.store(channelIndex, std::memory_order_release);
+}
+
+void AudioEngine::cancelPendingSectionRecord()
+{
+    pendingSectionRecordChannel.store(-1, std::memory_order_release);
 }

@@ -134,6 +134,23 @@ public:
     void doubleLoopLength();
 
     //==========================================================================
+    // A/B/C Sections
+    //==========================================================================
+
+    void setActiveSection(int section);
+    int  getActiveSection() const { return activeGlobalSection.load(std::memory_order_relaxed); }
+    juce::int64 getSectionLoopLength(int s) const;
+    void setSectionLoopLength(int s, juce::int64 len);
+    int  getPendingSection() const { return pendingGlobalSection.load(std::memory_order_relaxed); }
+
+    /** Queue a record/overdub to start when the pending section switch fires. */
+    void queueRecordForPendingSection(int channelIndex, bool isOverdub);
+    /** Cancel a queued record-ahead. */
+    void cancelPendingSectionRecord();
+    /** Get channel queued for record-ahead (-1 = none). */
+    int  getPendingSectionRecordChannel() const { return pendingSectionRecordChannel.load(std::memory_order_relaxed); }
+
+    //==========================================================================
     // Auto-Start (input threshold trigger)
     //==========================================================================
 
@@ -223,6 +240,15 @@ public:
     float getMasterGain() const;
 
     //==========================================================================
+    // Master Recording
+    //==========================================================================
+
+    bool startMasterRecording(const juce::File& directory);
+    void stopMasterRecording();
+    bool isMasterRecording() const;
+    juce::File getMasterRecordFile() const;
+
+    //==========================================================================
     // Mute Groups (message thread only)
     //==========================================================================
 
@@ -249,6 +275,8 @@ public:
     // Diagnostics
     //==========================================================================
 
+    juce::AudioFormatManager& getFormatManager() { return formatManager; }
+
     double getCPUUsage()           const { return deviceManager.getCpuUsage() * 100.0; }
     int    getNumPendingCommands() const { return commandQueue.getNumPending(); }
     bool   isCommandQueueFull()    const { return commandQueue.isFull(); }
@@ -268,6 +296,7 @@ public:
 private:
     //==========================================================================
     // Core components
+    juce::AudioFormatManager       formatManager;
     juce::AudioDeviceManager       deviceManager;
     std::unique_ptr<LoopEngine>    loopEngine;
     std::unique_ptr<Metronome>     metronome;
@@ -298,6 +327,15 @@ private:
     // Play/stop channel memory — bitmask of channels that were playing when stop was pressed
     std::atomic<uint8_t> lastActiveChannels     {0};
 
+    // A/B/C sections
+    std::atomic<int> activeGlobalSection        {0};
+    std::atomic<int> pendingGlobalSection       {-1};   // -1 = none pending
+    std::array<std::atomic<juce::int64>, NUM_SECTIONS> sectionLoopLengths;  // initialized in ctor
+
+    // Latch record-ahead: queue recording to start when pending section activates
+    std::atomic<int>  pendingSectionRecordChannel   {-1};  // channel to start recording, -1 = none
+    std::atomic<bool> pendingSectionRecordIsOverdub {false};
+
     // Auto-start
     std::atomic<bool>  autoStartEnabled         {false};
     std::atomic<float> autoStartThresholdLinear {0.031623f};   // ~-30 dB
@@ -324,6 +362,13 @@ private:
 
     // Master output volume
     std::atomic<float> masterGain              {1.0f};
+
+    // Master recording
+    std::atomic<bool> masterRecordingActive {false};
+    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> masterRecordWriter;
+    juce::AudioBuffer<float> masterRecordBuffer;  // 2-ch temp buffer (audio thread only)
+    juce::TimeSliceThread masterRecordThread {"Master Record Thread"};
+    juce::File masterRecordFile;  // message thread only
 
     // Working buffers (audio thread only)
     juce::AudioBuffer<float> inputBuffer;

@@ -125,7 +125,21 @@ public:
      * Silently fails if no auto-save exists yet.
      */
     juce::Result loadCurrentSong(AudioEngine& audioEngine);
-    
+
+    //==========================================================================
+    // Song Template (settings only, no recordings)
+    //==========================================================================
+
+    /**
+     * @brief Save song template (routing, VST, BPM, metronome settings — no loop data).
+     */
+    juce::Result saveSongTemplate(Song& song, AudioEngine& audioEngine);
+
+    /**
+     * @brief Apply a song template to the engine (settings only, preserves existing loops).
+     */
+    juce::Result applySongTemplateToEngine(const Song& song, AudioEngine& audioEngine);
+
 private:
     //==========================================================================
     // JSON Serialization
@@ -178,9 +192,33 @@ private:
     /**
      * @brief Read channel state from audio engine
      */
-    ChannelConfig readChannelState(Channel* channel, 
+    ChannelConfig readChannelState(Channel* channel,
                                    AudioEngine& audioEngine,
                                    int channelIndex);
+
+    /**
+     * @brief Mix down base loop + overdub layers into a single buffer
+     */
+    juce::AudioBuffer<float> mixDownChannel(
+        const juce::AudioBuffer<float>& baseLoop,
+        const std::vector<juce::AudioBuffer<float>>& overdubLayers,
+        juce::int64 numSamples);
+
+    /**
+     * @brief Save audio buffer to WAV file (24-bit, crash-safe via temp rename)
+     */
+    juce::Result saveWavFile(const juce::File& file,
+                             const juce::AudioBuffer<float>& buffer,
+                             juce::int64 numSamples,
+                             double sampleRate);
+
+    /**
+     * @brief Load audio from WAV file into buffer
+     * @return Number of samples read, or -1 on failure
+     */
+    juce::int64 loadWavFile(const juce::File& file,
+                            juce::AudioBuffer<float>& buffer,
+                            juce::int64 maxSamples);
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SongManager)
 };

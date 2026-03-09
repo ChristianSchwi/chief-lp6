@@ -58,6 +58,7 @@ struct ChannelConfig
     bool muted{false};
     bool solo{false};
     int  muteGroup{0};   ///< 0=none, 1-4
+    bool oneShot{false};
     
     // VSTi instrument (only for VSTi channels)
     PluginData vstInstrument;
@@ -65,11 +66,15 @@ struct ChannelConfig
     // Insert FX plugins (3 slots)
     std::array<PluginData, 3> fxPlugins;
     
-    // Loop file reference
-    juce::String loopFileName;              ///< e.g. "channel_0.loop"
-    bool hasLoopData{false};
-    int  overdubLayerCount{0};              ///< number of overdub layers saved
-    
+    // Per-section loop data
+    struct SectionData
+    {
+        juce::String loopFileName;
+        bool hasLoopData {false};
+        int overdubLayerCount {0};
+    };
+    std::array<SectionData, NUM_SECTIONS> sectionData;
+
     ChannelConfig() = default;
 };
 
@@ -79,7 +84,7 @@ struct ChannelConfig
  */
 struct Song
 {
-    static constexpr const char* FORMAT_VERSION = "1.0.0";
+    static constexpr const char* FORMAT_VERSION = "1.1.0";
     
     // Metadata
     juce::String formatVersion{FORMAT_VERSION};
@@ -93,7 +98,12 @@ struct Song
     double bpm{120.0};
     int beatsPerLoop{4};
     bool latchModeEnabled{false};
+    double sampleRate{44100.0};           ///< Sample rate at which loops were recorded
     
+    // A/B/C sections
+    int activeSection {0};
+    std::array<juce::int64, NUM_SECTIONS> sectionLoopLengths {0, 0, 0};
+
     // Channel configurations
     std::array<ChannelConfig, 6> channels;
     
@@ -124,7 +134,7 @@ struct Song
     }
     
     /**
-     * @brief Get loop file for a channel
+     * @brief Get loop file for a channel (section 0 = backward compat)
      */
     juce::File getLoopFile(int channelIndex) const
     {
@@ -132,7 +142,19 @@ struct Song
     }
 
     /**
-     * @brief Get overdub layer file for a channel
+     * @brief Get loop file for a channel in a specific section
+     */
+    juce::File getSectionLoopFile(int channelIndex, int section) const
+    {
+        if (section == 0)
+            return getLoopFile(channelIndex);
+        return songDirectory.getChildFile(
+            "channel_" + juce::String(channelIndex) +
+            "_sec_" + juce::String(section) + ".loop");
+    }
+
+    /**
+     * @brief Get overdub layer file for a channel (section 0 = backward compat)
      */
     juce::File getOverdubLayerFile(int channelIndex, int layerIndex) const
     {
@@ -140,7 +162,35 @@ struct Song
             "channel_" + juce::String(channelIndex) +
             "_ovd_" + juce::String(layerIndex) + ".loop");
     }
+
+    /**
+     * @brief Get overdub layer file for a channel in a specific section
+     */
+    juce::File getSectionOverdubLayerFile(int channelIndex, int section, int layerIndex) const
+    {
+        if (section == 0)
+            return getOverdubLayerFile(channelIndex, layerIndex);
+        return songDirectory.getChildFile(
+            "channel_" + juce::String(channelIndex) +
+            "_sec_" + juce::String(section) +
+            "_ovd_" + juce::String(layerIndex) + ".loop");
+    }
     
+    /**
+     * @brief Get WAV file path for a channel/section
+     * @param prefix Song name prefix (empty for auto-save fixed names)
+     */
+    juce::File getWavFile(int channelIndex, int section,
+                          const juce::String& prefix = {}) const
+    {
+        juce::String name;
+        if (prefix.isNotEmpty())
+            name = prefix + "_";
+        name += "channel_" + juce::String(channelIndex) +
+                "_section_" + juce::String(section) + ".wav";
+        return songDirectory.getChildFile(name);
+    }
+
     /**
      * @brief Check if song directory exists and is valid
      */

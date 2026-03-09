@@ -10,16 +10,31 @@
 enum class ChannelType  { Audio, VSTi };
 enum class ChannelState { Idle, Recording, Playing, Overdubbing };
 
+static constexpr int NUM_SECTIONS = 3;
+
+//==============================================================================
+struct SectionBufferSet
+{
+    juce::AudioBuffer<float> loopBuffer;
+    std::vector<juce::AudioBuffer<float>> overdubLayers;
+    int activeOverdubLayerIdx {-1};
+    std::atomic<juce::AudioBuffer<float>*> stagedOverdubBuffer {nullptr};
+    std::atomic<bool> loopHasContent {false};
+    bool allocated {false};
+
+    ~SectionBufferSet()
+    {
+        auto* staged = stagedOverdubBuffer.exchange(nullptr, std::memory_order_acquire);
+        delete staged;
+    }
+};
+
 //==============================================================================
 class Channel
 {
 public:
     Channel(int channelIndex, ChannelType type);
-    virtual ~Channel()
-    {
-        auto* staged = stagedOverdubBuffer.exchange(nullptr, std::memory_order_relaxed);
-        delete staged;
-    }
+    virtual ~Channel() = default;
 
     //==========================================================================
     // Audio Thread
@@ -76,6 +91,8 @@ public:
     bool        isSoloMuted() const { return soloMuted.load(std::memory_order_relaxed); }
     void        setIsActiveChannel(bool active) { isActiveChannel.store(active, std::memory_order_release); }
     bool        getIsActiveChannel() const      { return isActiveChannel.load(std::memory_order_relaxed); }
+    void        setOneShot(bool enabled)        { oneShot.store(enabled, std::memory_order_release); }
+    bool        isOneShot() const               { return oneShot.load(std::memory_order_relaxed); }
 
     //==========================================================================
     // Routing
@@ -100,6 +117,22 @@ public:
      */
     juce::AudioPluginInstance* getPlugin(int slotIndex) const;
 
+    /** Check if a plugin has crashed (processing is bypassed but still loaded). */
+    bool isPluginCrashed(int slotIndex) const
+    {
+        if (slotIndex < 0 || slotIndex >= 3) return false;
+        return fxChain[slotIndex].crashed.load(std::memory_order_relaxed);
+    }
+
+    /** Check if any plugin in the FX chain has crashed. */
+    bool hasAnyCrashedPlugin() const
+    {
+        for (const auto& slot : fxChain)
+            if (slot.crashed.load(std::memory_order_relaxed))
+                return true;
+        return false;
+    }
+
     //==========================================================================
     // State Queries
     //==========================================================================
@@ -108,33 +141,50 @@ public:
     ChannelState getState()        const { return state.load(std::memory_order_relaxed); }
     int          getChannelIndex() const { return channelIndex; }
 
-    bool hasLoop()       const { return loopHasContent.load(std::memory_order_relaxed); }
+    float getInputPeakL()  const { return inputPeakL.load(std::memory_order_relaxed); }
+    float getInputPeakR()  const { return inputPeakR.load(std::memory_order_relaxed); }
+    float getLoopPeakL()   const { return loopPeakL.load(std::memory_order_relaxed); }
+    float getLoopPeakR()   const { return loopPeakR.load(std::memory_order_relaxed); }
+
+    bool hasLoop()       const;
     bool isIdle()        const { return getState() == ChannelState::Idle; }
     bool isRecording()   const { return getState() == ChannelState::Recording; }
     bool isPlaying()     const { return getState() == ChannelState::Playing; }
     bool isOverdubbing() const { return getState() == ChannelState::Overdubbing; }
 
     //==========================================================================
+    // Section Management
+    //==========================================================================
+
+    void setActiveSection(int s);
+    int  getActiveSection() const { return activeSection.load(std::memory_order_relaxed); }
+    bool sectionHasContent(int s) const;
+    bool hasContentInAnySection() const;
+    void allocateSection(int s);
+    void clearSection(int s);
+    void clearAllSections();
+
+    //==========================================================================
     // Loop Buffer I/O (Message Thread — call only when audio is stopped or saved)
     //==========================================================================
 
-    /** Read-only access to loop buffer for SongManager::saveSong(). */
-    const juce::AudioBuffer<float>& getLoopBuffer()   const { return loopBuffer; }
+    /** Read-only access to loop buffer for active section. */
+    const juce::AudioBuffer<float>& getLoopBuffer() const { return sections[activeSection.load(std::memory_order_relaxed)].loopBuffer; }
+
+    /** Read-only access to a specific section's loop buffer. */
+    const juce::AudioBuffer<float>& getSectionLoopBuffer(int s) const { return sections[s].loopBuffer; }
+
+    /** Read-only access to a specific section's overdub layers. */
+    const std::vector<juce::AudioBuffer<float>>& getSectionOverdubLayers(int s) const { return sections[s].overdubLayers; }
 
     /** Max capacity in samples (0 if prepareToPlay not yet called). */
     juce::int64                     getLoopBufferSize() const { return loopBufferSize; }
 
-    /**
-     * @brief Copy pre-recorded audio into the loop buffer.
-     *
-     * Only call from message thread when audio is stopped.
-     * Clears existing content before copy.
-     *
-     * @param source     Stereo source buffer (≥2 channels)
-     * @param numSamples Samples to copy (clamped to loopBufferSize)
-     * @return true on success
-     */
+    /** Load loop data into the active section. */
     bool loadLoopData(const juce::AudioBuffer<float>& source, juce::int64 numSamples);
+
+    /** Load loop data into a specific section. */
+    bool loadLoopData(int section, const juce::AudioBuffer<float>& source, juce::int64 numSamples);
 
     //==========================================================================
     // Overdub Layers
@@ -143,19 +193,28 @@ public:
     /** Pre-allocate a buffer for the next overdub pass (call on message thread). */
     void stageOverdubBuffer(juce::int64 loopLength);
 
+    /** Pre-allocate for a specific section. */
+    void stageOverdubBuffer(juce::int64 loopLength, int section);
+
     /** Remove the last overdub layer (or cancel active overdub). Audio thread. */
     void undoLastOverdub();
 
-    int  getOverdubLayerCount() const { return static_cast<int>(overdubLayers.size()); }
-    bool canUndoOverdub()       const { return !overdubLayers.empty(); }
+    int  getOverdubLayerCount() const;
+    bool canUndoOverdub()       const;
 
-    /** Append a pre-recorded overdub layer (message thread, audio stopped). */
+    /** Append a pre-recorded overdub layer to active section (message thread, audio stopped). */
     bool loadOverdubLayer(const juce::AudioBuffer<float>& source, juce::int64 numSamples);
 
-    /** Read-only access to overdub layers for SongManager. */
-    const std::vector<juce::AudioBuffer<float>>& getOverdubLayers() const { return overdubLayers; }
+    /** Append a pre-recorded overdub layer to a specific section. */
+    bool loadOverdubLayer(int section, const juce::AudioBuffer<float>& source, juce::int64 numSamples);
 
-    /** Duplicate loop content: copy [0..len) to [len..2*len). Audio thread only. */
+    /** Read-only access to overdub layers for active section. */
+    const std::vector<juce::AudioBuffer<float>>& getOverdubLayers() const;
+
+    /** Duplicate loop content for a specific section. Audio thread only. */
+    void doubleBuffer(int sectionIndex, juce::int64 currentLoopLength);
+
+    /** Duplicate loop content for active section (backward compat). */
     void doubleBuffer(juce::int64 currentLoopLength);
 
 protected:
@@ -164,7 +223,6 @@ protected:
     ChannelType channelType;
 
     std::atomic<ChannelState> state          {ChannelState::Idle};
-    std::atomic<bool>         loopHasContent {false};
     std::atomic<bool>         muted          {false};
     std::atomic<bool>         solo           {false};
     std::atomic<bool>         soloMuted      {false};
@@ -173,21 +231,25 @@ protected:
     std::atomic<bool>         overdubPending {false};
     std::atomic<bool>         playPending    {false};
     std::atomic<bool>         isActiveChannel{false};
+    std::atomic<bool>         oneShot        {false};
 
     std::atomic<float>       gainLinear  {1.0f};
     std::atomic<MonitorMode> monitorMode {MonitorMode::WhenTrackActive};
 
     RoutingConfig routing;
 
-    juce::AudioBuffer<float> loopBuffer;
-    juce::int64              loopBufferSize {0};
-
-    std::vector<juce::AudioBuffer<float>> overdubLayers;
-    int activeOverdubLayerIdx {-1};
-    std::atomic<juce::AudioBuffer<float>*> stagedOverdubBuffer {nullptr};
+    std::array<SectionBufferSet, NUM_SECTIONS> sections;
+    std::atomic<int> activeSection {0};
+    juce::int64      loopBufferSize {0};
 
     juce::AudioBuffer<float> workingBuffer;
     juce::AudioBuffer<float> fxBuffer;
+
+    // Peak meters (updated by audio thread, read by GUI)
+    std::atomic<float> inputPeakL  {0.0f};
+    std::atomic<float> inputPeakR  {0.0f};
+    std::atomic<float> loopPeakL   {0.0f};
+    std::atomic<float> loopPeakR   {0.0f};
 
     struct PluginSlot
     {
@@ -204,6 +266,10 @@ protected:
     void checkAndExecutePendingStop(juce::int64 playheadPosition,
                                     juce::int64 loopLength,
                                     int numSamples);
+
+    void checkOneShotStop(juce::int64 playheadPosition,
+                          juce::int64 loopLength,
+                          int numSamples);
 
     void processFXChain(juce::AudioBuffer<float>& buffer,
                         int numSamples,

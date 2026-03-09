@@ -197,6 +197,7 @@ void VSTiChannel::processBlock(const float* const* inputChannelData,
                                int numOutputChannels)
 {
     checkAndExecutePendingStop(playheadPosition, loopLength, numSamples);
+    checkOneShotStop(playheadPosition, loopLength, numSamples);
 
     // Clear all working buffers
     workingBuffer.clear(0, numSamples);
@@ -226,6 +227,14 @@ void VSTiChannel::processBlock(const float* const* inputChannelData,
     for (int ch = 0; ch < chsToCopy; ++ch)
         workingBuffer.copyFrom(ch, 0, vstiOutputBuffer, ch, 0, numSamples);
 
+    // Compute input peaks (VSTi output = "input" for this channel)
+    {
+        auto rangeL = juce::FloatVectorOperations::findMinAndMax(workingBuffer.getReadPointer(0), numSamples);
+        auto rangeR = juce::FloatVectorOperations::findMinAndMax(workingBuffer.getReadPointer(1), numSamples);
+        inputPeakL.store(juce::jmax(std::abs(rangeL.getStart()), std::abs(rangeL.getEnd())), std::memory_order_relaxed);
+        inputPeakR.store(juce::jmax(std::abs(rangeR.getStart()), std::abs(rangeR.getEnd())), std::memory_order_relaxed);
+    }
+
     //==========================================================================
     // 3. RECORD DRY SIGNAL (before FX — loop always stores clean audio)
     //==========================================================================
@@ -254,8 +263,21 @@ void VSTiChannel::processBlock(const float* const* inputChannelData,
         playFromLoop(workingBuffer, playheadPosition, numSamples);
         applyGain(workingBuffer, numSamples);
 
+        // Compute loop peaks
+        {
+            auto rangeL = juce::FloatVectorOperations::findMinAndMax(workingBuffer.getReadPointer(0), numSamples);
+            auto rangeR = juce::FloatVectorOperations::findMinAndMax(workingBuffer.getReadPointer(1), numSamples);
+            loopPeakL.store(juce::jmax(std::abs(rangeL.getStart()), std::abs(rangeL.getEnd())), std::memory_order_relaxed);
+            loopPeakR.store(juce::jmax(std::abs(rangeR.getStart()), std::abs(rangeR.getEnd())), std::memory_order_relaxed);
+        }
+
         for (int ch = 0; ch < fxBuffer.getNumChannels(); ++ch)
             fxBuffer.addFrom(ch, 0, workingBuffer, ch, 0, numSamples);
+    }
+    else
+    {
+        loopPeakL.store(0.0f, std::memory_order_relaxed);
+        loopPeakR.store(0.0f, std::memory_order_relaxed);
     }
 
     //==========================================================================

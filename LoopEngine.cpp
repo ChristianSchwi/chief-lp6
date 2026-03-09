@@ -43,12 +43,18 @@ void LoopEngine::setLoopLength(juce::int64 lengthInSamples)
 {
     jassert(lengthInSamples >= 0);
     loopLengthSamples.store(lengthInSamples, std::memory_order_release);
-    
-    // Reset playhead if it's beyond the new length
-    juce::int64 currentPos = playheadPosition.load(std::memory_order_relaxed);
-    if (currentPos >= lengthInSamples)
+
+    // Reset playhead if it's beyond the new length (CAS loop to avoid TOCTOU race)
+    if (lengthInSamples > 0)
     {
-        playheadPosition.store(0, std::memory_order_release);
+        juce::int64 currentPos = playheadPosition.load(std::memory_order_relaxed);
+        while (currentPos >= lengthInSamples)
+        {
+            if (playheadPosition.compare_exchange_weak(currentPos, 0,
+                    std::memory_order_release, std::memory_order_relaxed))
+                break;
+            // currentPos is reloaded by compare_exchange_weak on failure
+        }
     }
 }
 

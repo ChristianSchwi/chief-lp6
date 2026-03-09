@@ -9,13 +9,13 @@ ShowComponent::ShowComponent(AudioEngine& engine,
     , showManager(showMgr)
 {
     //--------------------------------------------------------------------------
-    // Show controls
-    loadShowButton.onClick = [this] { loadShowClicked(); };
-    addAndMakeVisible(loadShowButton);
+    // Load button — opens context menu
+    loadButton.onClick = [this] { showLoadMenu(); };
+    addAndMakeVisible(loadButton);
 
-    saveShowButton.onClick = [this] { saveShowClicked(); };
-    saveShowButton.setEnabled(false);  // only enabled when a show is loaded
-    addAndMakeVisible(saveShowButton);
+    // Save button — opens context menu
+    saveButton.onClick = [this] { showSaveMenu(); };
+    addAndMakeVisible(saveButton);
 
     showNameLabel.setText("No Show", juce::dontSendNotification);
     showNameLabel.setFont(juce::Font(13.0f, juce::Font::italic));
@@ -38,13 +38,7 @@ ShowComponent::ShowComponent(AudioEngine& engine,
     addAndMakeVisible(songPositionLabel);
 
     //--------------------------------------------------------------------------
-    // Individual song
-    loadSongButton.onClick = [this] { loadSongClicked(); };
-    addAndMakeVisible(loadSongButton);
-
-    saveSongButton.onClick = [this] { saveSongClicked(); };
-    addAndMakeVisible(saveSongButton);
-
+    // Add to show
     addToShowButton.onClick = [this] { addToShowClicked(); };
     addToShowButton.setEnabled(false);  // only when a show is loaded
     addAndMakeVisible(addToShowButton);
@@ -78,8 +72,8 @@ void ShowComponent::resized()
 
     // --- Show section (left) ---
     auto showSection = area.removeFromLeft(260);
-    loadShowButton.setBounds(showSection.removeFromLeft(90).reduced(2));
-    saveShowButton.setBounds(showSection.removeFromLeft(90).reduced(2));
+    loadButton.setBounds(showSection.removeFromLeft(70).reduced(2));
+    saveButton.setBounds(showSection.removeFromLeft(70).reduced(2));
     showNameLabel .setBounds(showSection.reduced(2));
 
     area.removeFromLeft(10);  // gap after separator
@@ -93,8 +87,6 @@ void ShowComponent::resized()
     area.removeFromLeft(10);
 
     // --- Individual song (right) ---
-    loadSongButton  .setBounds(area.removeFromLeft(90).reduced(2));
-    saveSongButton  .setBounds(area.removeFromLeft(90).reduced(2));
     addToShowButton .setBounds(area.removeFromLeft(70).reduced(2));
 }
 
@@ -137,6 +129,42 @@ void ShowComponent::updateSongPositionLabel()
 }
 
 //==============================================================================
+// Context menus
+//==============================================================================
+
+void ShowComponent::showLoadMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem(1, "Load Show");
+    menu.addItem(2, "Load Song");
+    menu.addItem(3, "Load Song Template");
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&loadButton),
+                       [this](int id)
+    {
+        if (id == 1) loadShowClicked();
+        else if (id == 2) loadSongClicked();
+        else if (id == 3) loadSongTemplateClicked();
+    });
+}
+
+void ShowComponent::showSaveMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem(1, "Save Show", showLoaded);
+    menu.addItem(2, "Save Song");
+    menu.addItem(3, "Save Song Template");
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&saveButton),
+                       [this](int id)
+    {
+        if (id == 1) saveShowClicked();
+        else if (id == 2) saveSongClicked();
+        else if (id == 3) saveSongTemplateClicked();
+    });
+}
+
+//==============================================================================
 // Show handlers
 //==============================================================================
 
@@ -171,7 +199,6 @@ void ShowComponent::loadShowClicked()
         currentSongIndex = -1;
 
         showNameLabel.setText(currentShow.showName, juce::dontSendNotification);
-        saveShowButton.setEnabled(true);
         addToShowButton.setEnabled(true);
         updateSongPositionLabel();
 
@@ -391,6 +418,85 @@ void ShowComponent::saveSongClicked()
         {
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Save Song",
+                "Failed to save: " + saveResult.getErrorMessage());
+        }
+    });
+}
+
+//==============================================================================
+// Song Template handlers
+//==============================================================================
+
+void ShowComponent::loadSongTemplateClicked()
+{
+    if (!audioIsReady)
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon, "Load Template",
+            "Audio not yet initialized.");
+        return;
+    }
+
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Load Song Template",
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+        "song.json");
+
+    const auto flags = juce::FileBrowserComponent::openMode |
+                       juce::FileBrowserComponent::canSelectFiles;
+
+    fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+    {
+        auto file = chooser.getResult();
+        if (!file.existsAsFile()) return;
+
+        Song song;
+        auto result = songManager.loadSong(file, song);
+
+        if (result.wasOk())
+            result = songManager.applySongTemplateToEngine(song, audioEngine);
+
+        if (!result.wasOk())
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon, "Load Template",
+                result.getErrorMessage());
+        }
+    });
+}
+
+void ShowComponent::saveSongTemplateClicked()
+{
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Save Song Template – Enter Name",
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+            .getChildFile("MyTemplate"),
+        "");
+
+    const auto flags = juce::FileBrowserComponent::saveMode;
+
+    fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+    {
+        const auto result = chooser.getResult();
+        if (result.getFullPathName().isEmpty()) return;
+
+        const juce::String templateName = result.getFileNameWithoutExtension();
+        if (templateName.isEmpty()) return;
+
+        auto dir = result.getParentDirectory().getChildFile(templateName);
+        dir.createDirectory();
+        if (!dir.isDirectory()) return;
+
+        Song song;
+        song.songName      = templateName;
+        song.songDirectory = dir;
+
+        const auto saveResult = songManager.saveSongTemplate(song, audioEngine);
+
+        if (!saveResult.wasOk())
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon, "Save Template",
                 "Failed to save: " + saveResult.getErrorMessage());
         }
     });

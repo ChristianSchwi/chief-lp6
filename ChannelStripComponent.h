@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "ContextMenuControls.h"
+#include "LevelMeterComponent.h"
 
 //==============================================================================
 /**
@@ -48,12 +49,25 @@ private:
     ContextMenuButton soloButton  {"S"};
     juce::ComboBox   monitorModeBox;
 
+    // One-shot mode
+    juce::TextButton oneShotButton {"1x"};
+
     // Mute group assignment buttons
     std::array<juce::TextButton, 4> muteGroupButtons;
+
+    // Import audio file
+    juce::TextButton openFileButton {"FILE"};
+    std::unique_ptr<juce::FileChooser> fileChooser;
+
+    // Level meters
+    LevelMeterComponent inputMeter;
+    LevelMeterComponent loopMeter;
 
     // Display
     juce::Label      channelLabel;
     juce::Label      stateLabel;
+
+    int muteGrpHeaderY = 0;
 
     //==========================================================================
     void timerCallback() override;
@@ -67,6 +81,8 @@ private:
     void gainChanged();
 
     void monitorModeChanged();
+    void openFileClicked();
+    void loadAudioFile(const juce::File& file);
     void showMidiContextMenu(MidiControlTarget target);
 
     bool isActiveChannel()  const { return audioEngine.getActiveChannel() == channelIndex; }
