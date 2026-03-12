@@ -1,6 +1,7 @@
 #include "ChannelStripComponent.h"
 #include "RoutingComponent.h"
 #include "PluginManagerComponent.h"
+#include "AppConfig.h"
 
 //==============================================================================
 ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
@@ -124,7 +125,7 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     addAndMakeVisible(soloButton);
 
     // Mute group assignment buttons
-    for (int g = 0; g < 4; ++g)
+    for (int g = 0; g < kMaxMuteGroups; ++g)
     {
         muteGroupButtons[g].setButtonText(juce::String(g + 1));
         muteGroupButtons[g].setClickingTogglesState(false);
@@ -139,6 +140,7 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     }
 
     // One-shot button
+    oneShotButton.setButtonText("Oneshot");
     oneShotButton.setClickingTogglesState(true);
     oneShotButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::cyan);
     oneShotButton.setTooltip("One-shot: channel stops automatically after one full loop playback.");
@@ -150,6 +152,7 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     addAndMakeVisible(oneShotButton);
 
     // Open file button
+    openFileButton.setButtonText("Load File");
     openFileButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
     openFileButton.setTooltip("Import an audio file (WAV/AIFF/FLAC/MP3) into this channel's loop.");
     openFileButton.onClick = [this] { openFileClicked(); };
@@ -237,18 +240,21 @@ void ChannelStripComponent::resized()
     monitorModeBox.setBounds(area.removeFromTop(22));
     area.removeFromTop(2);
 
-    // Reserve bottom for FILE + 1x + mute group section
-    openFileButton.setBounds(area.removeFromBottom(26).reduced(1));
-    area.removeFromBottom(2);
-    oneShotButton.setBounds(area.removeFromBottom(26).reduced(1));
+    // Reserve bottom for FILE + Oneshot (one row) + mute group section
+    {
+        auto fileRow = area.removeFromBottom(26);
+        const int half = fileRow.getWidth() / 2;
+        openFileButton.setBounds(fileRow.removeFromLeft(half).reduced(1));
+        oneShotButton .setBounds(fileRow.reduced(1));
+    }
     area.removeFromBottom(2);
 
     // Reserve bottom for mute group section: 14px header + 4px gap + 20px buttons = 38px
     auto muteGrpArea = area.removeFromBottom(38);
     muteGrpHeaderY = muteGrpArea.getY();
     muteGrpArea.removeFromTop(18); // 14px header + 4px gap
-    const int mgW = muteGrpArea.getWidth() / 4;
-    for (int g = 0; g < 4; ++g)
+    const int mgW = muteGrpArea.getWidth() / kMaxMuteGroups;
+    for (int g = 0; g < kMaxMuteGroups; ++g)
         muteGroupButtons[g].setBounds(muteGrpArea.removeFromLeft(mgW).reduced(1));
 
     // Gain slider + meters fill remaining space
@@ -311,7 +317,7 @@ void ChannelStripComponent::timerCallback()
 
     // Sync mute group buttons
     const int currentGroup = audioEngine.getChannelMuteGroup(channelIndex);
-    for (int g = 0; g < 4; ++g)
+    for (int g = 0; g < kMaxMuteGroups; ++g)
         muteGroupButtons[g].setToggleState(currentGroup == g + 1, juce::dontSendNotification);
 
     // Sync monitor mode box
@@ -517,6 +523,13 @@ void ChannelStripComponent::mainButtonClicked()
         }
     }
 
+    // Auto-start global play when triggering playback on a channel
+    const auto ensurePlaying = [this]()
+    {
+        if (!audioEngine.isPlaying())
+            audioEngine.setPlaying(true);
+    };
+
     if (overdubMode && state == ChannelState::Playing)
     {
         // Overdub mode: playing → start overdub instead of stopping
@@ -535,6 +548,7 @@ void ChannelStripComponent::mainButtonClicked()
     }
     else if (!hasLoop)
     {
+        ensurePlaying();
         audioEngine.sendCommand(Command::startRecord(channelIndex));
     }
     else if (state == ChannelState::Playing)
@@ -543,6 +557,7 @@ void ChannelStripComponent::mainButtonClicked()
     }
     else  // idle, has loop
     {
+        ensurePlaying();
         audioEngine.sendCommand(Command::startPlayback(channelIndex));
     }
 }

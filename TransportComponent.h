@@ -38,6 +38,9 @@ public:
      */
     void refreshAfterAudioInit();
 
+    /** Optional override for master recording directory (empty = default). */
+    std::function<juce::String()> getMasterRecordPath;
+
 private:
     AudioEngine& audioEngine;
 
@@ -99,10 +102,10 @@ private:
     ContextMenuButton doubleLoopButton{"Double Loop"};
 
     // Master Recording
-    ContextMenuToggleButton masterRecordButton {"Rec Master"};
+    ContextMenuButton masterRecordButton {"Rec Master"};
 
-    // Reset Song
-    juce::TextButton resetSongButton{"Reset Song"};
+    // Reset
+    juce::TextButton resetButton{"Reset"};
 
     //==========================================================================
     // A/B/C Sections
@@ -139,7 +142,7 @@ private:
     void autoStartThresholdChanged();
     void countInChanged();
     void fixedLenSliderChanged();
-    void resetSongClicked();
+    void resetClicked();
     void masterRecordClicked();
     void masterGainChanged();
 

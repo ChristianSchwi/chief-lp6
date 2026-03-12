@@ -12,10 +12,11 @@
  * @brief Show & Song management panel
  *
  * Layout (horizontal bar):
- *   [Load] [Show Name]  |  [< Prev] [Song N/M: SongName] [Next >]  |  [Save] [+ Show]
+ *   [New] [Load] [Save]  |  [< Prev] [Song N/M: SongName] [Next >]  |  [+ Show] [Show Name]
  *
+ * New button context menu:  New Song, New Show
  * Load button context menu: Load Show, Load Song, Load Song Template
- * Save button context menu: Save Show, Save Song, Save Song Template
+ * Save button context menu: Save Show, Save Song, Save Song Template, Save as Default Template
  */
 class ShowComponent : public juce::Component,
                       private juce::Timer
@@ -33,6 +34,14 @@ public:
     /** Called from MainComponent after audio init to enable full song load. */
     void setAudioReady(bool ready) { audioIsReady = ready; }
 
+    /** Set callbacks for default template path persistence. */
+    void setDefaultTemplateFunctions(std::function<juce::String()> getter,
+                                     std::function<void(const juce::String&)> setter)
+    {
+        getDefaultTemplatePath = std::move(getter);
+        setDefaultTemplatePath = std::move(setter);
+    }
+
 private:
     AudioEngine&  audioEngine;
     SongManager&  songManager;
@@ -44,10 +53,26 @@ private:
     // Show state
     Show         currentShow;
     bool         showLoaded      {false};
-    int          currentSongIndex{-1};   // index into currentShow.songs, -1 = none
+    int          currentSongIndex{-1};
 
     //==========================================================================
-    // Show controls
+    // Remembered last file-browser location
+    juce::File lastBrowseLocation;
+
+    juce::File getLastLocation() const
+    {
+        return lastBrowseLocation.exists() ? lastBrowseLocation
+             : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    }
+
+    //==========================================================================
+    // Default template path (persisted via MainComponent preferences)
+    std::function<juce::String()>              getDefaultTemplatePath;
+    std::function<void(const juce::String&)>   setDefaultTemplatePath;
+
+    //==========================================================================
+    // Controls
+    juce::TextButton newButton  {"New"};
     juce::TextButton loadButton {"Load"};
     juce::TextButton saveButton {"Save"};
     juce::Label      showNameLabel;
@@ -55,9 +80,8 @@ private:
     // Song navigation
     ContextMenuButton prevSongButton {"<"};
     ContextMenuButton nextSongButton {">"};
-    juce::Label      songPositionLabel;  // "Song 2/5: My Song"
+    juce::Label      songPositionLabel;
 
-    // Individual song controls
     juce::TextButton addToShowButton {"+ Show"};
 
     // File chooser (must outlive dialog)
@@ -68,9 +92,12 @@ private:
     void updateSongPositionLabel();
 
     // Context menu handlers
+    void showNewMenu();
     void showLoadMenu();
     void showSaveMenu();
 
+    void newSongClicked();
+    void newShowClicked();
     void loadShowClicked();
     void saveShowClicked();
     void prevSongClicked();
@@ -80,6 +107,7 @@ private:
     void saveSongClicked();
     void loadSongTemplateClicked();
     void saveSongTemplateClicked();
+    void saveAsDefaultTemplateClicked();
     void addToShowClicked();
 
     bool loadAndApplySong(int showSongIndex);

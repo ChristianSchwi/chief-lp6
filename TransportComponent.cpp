@@ -1,5 +1,6 @@
 #include "TransportComponent.h"
 #include "MetronomeRoutingComponent.h"
+#include "AppConfig.h"
 
 //==============================================================================
 TransportComponent::TransportComponent(AudioEngine& engine)
@@ -224,17 +225,17 @@ TransportComponent::TransportComponent(AudioEngine& engine)
 
     //--------------------------------------------------------------------------
     // Master Recording
-    masterRecordButton.setToggleState(false, juce::dontSendNotification);
-    masterRecordButton.setColour(juce::ToggleButton::tickColourId, juce::Colours::red);
+    masterRecordButton.setClickingTogglesState(false);
     masterRecordButton.setTooltip("Record master output (all channels, no metronome) to WAV file.");
     masterRecordButton.onClick = [this] { masterRecordClicked(); };
-    addAndMakeVisible(masterRecordButton);
+    if (!kFreeVersion)
+        addAndMakeVisible(masterRecordButton);
 
     //--------------------------------------------------------------------------
-    // Reset Song
-    resetSongButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
-    resetSongButton.onClick = [this] { resetSongClicked(); };
-    addAndMakeVisible(resetSongButton);
+    // Reset
+    resetButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
+    resetButton.onClick = [this] { resetClicked(); };
+    addAndMakeVisible(resetButton);
 
     //--------------------------------------------------------------------------
     // A/B/C Sections
@@ -253,7 +254,7 @@ TransportComponent::TransportComponent(AudioEngine& engine)
 
     //--------------------------------------------------------------------------
     // Mute Groups
-    for (int g = 0; g < 4; ++g)
+    for (int g = 0; g < kMaxMuteGroups; ++g)
     {
         muteGroupToggleButtons[g].setButtonText("G" + juce::String(g + 1));
         muteGroupToggleButtons[g].setClickingTogglesState(false);
@@ -292,6 +293,7 @@ void TransportComponent::refreshAfterAudioInit()
 {
     metroGainSlider.setValue(audioEngine.getMetronomeGain(), juce::dontSendNotification);
     masterGainSlider.setValue(audioEngine.getMasterGain(), juce::dontSendNotification);
+    beatsPerBarSlider.setValue(audioEngine.getBeatsPerBar(), juce::dontSendNotification);
 
     // Restore fixed-length slider from engine value
     {
@@ -374,6 +376,9 @@ void TransportComponent::resized()
     }
     area.removeFromTop(2);
     doubleLoopButton.setBounds(area.removeFromTop(26).reduced(0, 1));
+    area.removeFromTop(2);
+    if (!kFreeVersion)
+        masterRecordButton.setBounds(area.removeFromTop(26).reduced(0, 1));
     area.removeFromTop(6);
 
     // ── ACTIVE CHANNEL ────────────────────────────────────────────────────────
@@ -443,8 +448,6 @@ void TransportComponent::resized()
         autoStartThreshLabel.setBounds(row.removeFromLeft(65));
         autoStartSlider     .setBounds(row);
     }
-    area.removeFromTop(4);
-    masterRecordButton.setBounds(area.removeFromTop(24));
     area.removeFromTop(6);
 
     // ── UTILITY ───────────────────────────────────────────────────────────────
@@ -453,7 +456,7 @@ void TransportComponent::resized()
         auto row = area.removeFromTop(30);
         const int half = row.getWidth() / 2;
         midiLearnButton .setBounds(row.removeFromLeft(half).reduced(2, 3));
-        resetSongButton .setBounds(row                    .reduced(2, 3));
+        resetButton     .setBounds(row                    .reduced(2, 3));
     }
     area.removeFromTop(6);
 
@@ -471,8 +474,8 @@ void TransportComponent::resized()
     addSection("MUTE GROUPS");
     {
         auto row = area.removeFromTop(24);
-        const int btnW = row.getWidth() / 4;
-        for (int g = 0; g < 4; ++g)
+        const int btnW = row.getWidth() / kMaxMuteGroups;
+        for (int g = 0; g < kMaxMuteGroups; ++g)
             muteGroupToggleButtons[g].setBounds(row.removeFromLeft(btnW).reduced(1, 1));
     }
     area.removeFromTop(6);
@@ -500,6 +503,34 @@ void TransportComponent::updateDisplay()
     bpmEditor .setEnabled(!hasRec);
     tapButton .setEnabled(!hasRec);
     beatsPerBarSlider.setEnabled(!playing);
+
+    // Keep UI in sync with engine (e.g. after song load/template apply)
+    {
+        const int engineBPB = audioEngine.getBeatsPerBar();
+        if (static_cast<int>(beatsPerBarSlider.getValue()) != engineBPB)
+            beatsPerBarSlider.setValue(engineBPB, juce::dontSendNotification);
+
+        const double engineBPM = audioEngine.getLoopEngine().getBPM();
+        if (!bpmEditor.hasKeyboardFocus(false))
+        {
+            const double editorBPM = bpmEditor.getText().getDoubleValue();
+            if (std::abs(editorBPM - engineBPM) > 0.05)
+                bpmEditor.setText(juce::String(engineBPM, 1), juce::dontSendNotification);
+        }
+    }
+
+    // Tap button blink in sync with BPM
+    {
+        const double bpm = audioEngine.getLoopEngine().getBPM();
+        if (bpm > 0.0)
+        {
+            const double beatMs = 60000.0 / bpm;
+            const double now = static_cast<double>(juce::Time::getMillisecondCounter());
+            const bool beatOn = std::fmod(now / beatMs, 1.0) < 0.25;
+            tapButton.setColour(juce::TextButton::buttonColourId,
+                                beatOn ? juce::Colour(0xFF446688) : juce::Colour(0xFF333333));
+        }
+    }
 
     overdubButton  .setToggleState(audioEngine.isInOverdubMode(), juce::dontSendNotification);
     latchModeButton.setToggleState(audioEngine.isLatchMode(),     juce::dontSendNotification);
@@ -571,12 +602,17 @@ void TransportComponent::updateDisplay()
     }
 
     // Mute group toggle buttons
-    for (int g = 0; g < 4; ++g)
+    for (int g = 0; g < kMaxMuteGroups; ++g)
         muteGroupToggleButtons[g].setToggleState(audioEngine.isMuteGroupActive(g),
                                                   juce::dontSendNotification);
 
-    // Master recording button
-    masterRecordButton.setToggleState(audioEngine.isMasterRecording(), juce::dontSendNotification);
+    // Master recording button visual
+    {
+        const bool isRec = audioEngine.isMasterRecording();
+        masterRecordButton.setButtonText(isRec ? "STOP Master Rec" : "Rec Master");
+        masterRecordButton.setColour(juce::TextButton::buttonColourId,
+                                     isRec ? juce::Colours::red : juce::Colour(0xFF333333));
+    }
 }
 
 void TransportComponent::updateMetronomeButtonStates()
@@ -587,6 +623,24 @@ void TransportComponent::updateMetronomeButtonStates()
     // Metronom-Toggle: gesperrt wenn Aufnahmen vorhanden
     metronomeButton.setEnabled(!hasRecordings);
     metronomeButton.setToggleState(metroEnabled, juce::dontSendNotification);
+
+    // Beat-synced blink for metronome button — bright flash at beat start, then dark
+    {
+        const double bpm = audioEngine.getLoopEngine().getBPM();
+        if (metroEnabled && bpm > 0.0)
+        {
+            const double beatMs = 60000.0 / bpm;
+            const juce::uint32 now = juce::Time::getMillisecondCounter();
+            const double posInBeat = std::fmod(now / beatMs, 1.0);
+            const bool beatOn = posInBeat < 0.25;
+            metronomeButton.setColour(juce::TextButton::buttonColourId,
+                                      beatOn ? juce::Colour(0xFF446688) : juce::Colour(0xFF333333));
+        }
+        else
+        {
+            metronomeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF333333));
+        }
+    }
 
     if (hasRecordings != lastHasRecordings)
     {
@@ -720,22 +774,38 @@ void TransportComponent::fixedLenSliderChanged()
     audioEngine.setFixedLengthBars(steps[idx]);
 }
 
-void TransportComponent::resetSongClicked()
+void TransportComponent::resetClicked()
 {
-    // FIX: showAsync statt deprecated showOkCancelBox + ModalCallbackFunction
-    auto options = juce::MessageBoxOptions()
-        .withIconType(juce::MessageBoxIconType::WarningIcon)
-        .withTitle("Reset Song")
-        .withMessage("Alle Aufnahmen loeschen und Loop zuruecksetzen?")
-        .withButton("Reset")
-        .withButton("Abbrechen");
+    juce::PopupMenu menu;
+    menu.addItem(1, "Reset Recordings");
+    menu.addItem(2, "Reset Plugins and Mute Groups");
+    menu.addItem(3, "Reset Channel I/O");
 
-    juce::AlertWindow::showAsync(options, [this](int result)
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&resetButton),
+                       [this](int id)
     {
-        if (result == 1)  // "Reset" gedrückt
+        if (id == 1)
         {
             audioEngine.setPlaying(false);
             audioEngine.resetSong();
+        }
+        else if (id == 2)
+        {
+            for (int i = 0; i < 6; ++i)
+            {
+                for (int slot = 0; slot < 3; ++slot)
+                    audioEngine.removePlugin(i, slot);
+                audioEngine.setChannelMuteGroup(i, 0);
+            }
+        }
+        else if (id == 3)
+        {
+            for (int i = 0; i < 6; ++i)
+            {
+                auto* ch = audioEngine.getChannel(i);
+                if (ch)
+                    ch->setRouting(RoutingConfig{});
+            }
         }
     });
 }
@@ -844,7 +914,15 @@ void TransportComponent::masterRecordClicked()
     }
     else
     {
-        auto dir = SongManager::getCurrentSongDirectory();
+        juce::File dir;
+        if (getMasterRecordPath)
+        {
+            auto customPath = getMasterRecordPath();
+            if (customPath.isNotEmpty())
+                dir = juce::File(customPath);
+        }
+        if (dir == juce::File())
+            dir = SongManager::getCurrentSongDirectory();
         if (!audioEngine.startMasterRecording(dir))
             DBG("Master recording failed to start");
     }

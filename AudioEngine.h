@@ -112,6 +112,13 @@ public:
     std::function<void(int channelIndex, int slotIndex, const juce::String& error)>
         onPluginLoadError;
 
+    /** Called on the message thread when a plugin starts loading. */
+    std::function<void(int channelIndex, int slotIndex, const juce::String& pluginName)>
+        onPluginLoadStart;
+
+    /** Number of plugins currently being loaded asynchronously. */
+    int getPendingPluginLoads() const { return pendingPluginLoads.load(std::memory_order_relaxed); }
+
     void removePlugin(int channelIndex, int slotIndex);
 
     //==========================================================================
@@ -373,6 +380,9 @@ private:
     // Working buffers (audio thread only)
     juce::AudioBuffer<float> inputBuffer;
     juce::AudioBuffer<float> outputBuffer;
+
+    // Plugin load tracking
+    std::atomic<int> pendingPluginLoads {0};
 
     // Diagnostics
     std::atomic<juce::int64>  totalSamplesProcessed {0};

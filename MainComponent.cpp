@@ -1,13 +1,19 @@
 #include "MainComponent.h"
+#include "AppConfig.h"
 
 //==============================================================================
-MainComponent::MainComponent()
+MainComponent::MainComponent(std::function<void(const juce::String&)> splashCallback)
     : transportComponent(audioEngine)
 {
+    // Wire splash status before any heavy work so plugin load messages are visible
+    onSplashStatus = std::move(splashCallback);
+
     songManager  = std::make_unique<SongManager>();
     showManager  = std::make_unique<ShowManager>();
 
     loadPreferences();
+
+    if (onSplashStatus) onSplashStatus("Initializing audio...");
 
     // --- Audio init first ---
     initializeAudio();
@@ -18,9 +24,10 @@ MainComponent::MainComponent()
     // BUG A FIX: refreshAfterAudioInit() muss nach initializeAudio() aufgerufen werden,
     // damit metroOutputBox die tatsächliche Kanal-Anzahl kennt.
     transportComponent.refreshAfterAudioInit();
+    transportComponent.getMasterRecordPath = [this] { return masterRecordPath; };
 
     // --- Channel strips ---
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < kMaxChannels; ++i)
     {
         channelStrips[i] = std::make_unique<ChannelStripComponent>(audioEngine, i);
         addAndMakeVisible(channelStrips[i].get());
@@ -31,11 +38,15 @@ MainComponent::MainComponent()
                                                     *songManager,
                                                     *showManager);
     showComponent->setAudioReady(true);
+    showComponent->setDefaultTemplateFunctions(
+        [this]              { return defaultTemplatePath; },
+        [this](const juce::String& p) { defaultTemplatePath = p; savePreferences(); });
     addAndMakeVisible(showComponent.get());
 
     // --- Auto-recall last session if preference is set ---
     if (autoRecallLastSession)
     {
+        if (onSplashStatus) onSplashStatus("Restoring last session...");
         auto result = songManager->loadCurrentSong(audioEngine);
         if (!result.wasOk())
             DBG("Auto-recall: " + result.getErrorMessage()); // silently ignore on first run
@@ -59,7 +70,9 @@ MainComponent::MainComponent()
         auto* prefs = new PreferencesComponent(
             audioEngine.getMidiLearnManager(),
             [this]       { return autoRecallLastSession; },
-            [this](bool v) { autoRecallLastSession = v; savePreferences(); });
+            [this](bool v) { autoRecallLastSession = v; savePreferences(); },
+            [this]              { return masterRecordPath; },
+            [this](const juce::String& p) { masterRecordPath = p; savePreferences(); });
 
         juce::DialogWindow::LaunchOptions opts;
         opts.content.setOwned(prefs);
@@ -97,9 +110,14 @@ MainComponent::MainComponent()
     addAndMakeVisible(audioSettingsButton);
 
     // --- Logo ---
-    logo = juce::ImageCache::getFromMemory(
-        BinaryData::chief_lp6_logo_png,
-        BinaryData::chief_lp6_logo_pngSize);
+    if constexpr (kFreeVersion)
+        logo = juce::ImageCache::getFromMemory(
+            BinaryData::chief_lp2_Free_logo_png,
+            BinaryData::chief_lp2_Free_logo_pngSize);
+    else
+        logo = juce::ImageCache::getFromMemory(
+            BinaryData::chief_lp6_logo_png,
+            BinaryData::chief_lp6_logo_pngSize);
 
     // Show alert when a plugin fails to load
     audioEngine.onPluginLoadError = [](int ch, int slot, const juce::String& msg)
@@ -107,6 +125,13 @@ MainComponent::MainComponent()
         juce::AlertWindow::showMessageBoxAsync(
             juce::AlertWindow::WarningIcon, "Plugin Load Error",
             "Ch" + juce::String(ch + 1) + " Slot " + juce::String(slot + 1) + ": " + msg);
+    };
+
+    // Wire plugin load progress to splash screen callback
+    audioEngine.onPluginLoadStart = [this](int, int, const juce::String& name)
+    {
+        if (onSplashStatus)
+            onSplashStatus("Loading: " + name + "...");
     };
 
     // Auto-save settings whenever the audio device configuration changes
@@ -142,6 +167,24 @@ void MainComponent::paint(juce::Graphics& g)
         g.drawImage(logo, logoArea.toFloat(),
                     juce::RectanglePlacement::centred |
                     juce::RectanglePlacement::onlyReduceInSize);
+
+    // --- Free version branding in empty channel area ---
+    if constexpr (kFreeVersion)
+    {
+        if (!freeLogoArea.isEmpty())
+        {
+            g.setColour(juce::Colour(0xFF1A1A1A));
+            g.fillRect(freeLogoArea);
+
+            auto freeLogo = juce::ImageCache::getFromMemory(
+                BinaryData::chief_lp2_Free_logo_png,
+                BinaryData::chief_lp2_Free_logo_pngSize);
+            if (freeLogo.isValid())
+                g.drawImage(freeLogo, freeLogoArea.reduced(30).toFloat(),
+                            juce::RectanglePlacement::centred |
+                            juce::RectanglePlacement::onlyReduceInSize);
+        }
+    }
 
     // --- Loop progress bar ---
     if (!progressBarArea.isEmpty())
@@ -194,9 +237,15 @@ void MainComponent::resized()
     // Remaining area: transport (left panel) + 6 channel strips
     transportComponent.setBounds(area.removeFromLeft(transportWidth).reduced(4));
 
-    const int channelWidth = area.getWidth() / 6;
-    for (int i = 0; i < 6; ++i)
+    const int channelWidth = area.getWidth() / 6;  // always divide by 6 for consistent strip width
+    for (int i = 0; i < kMaxChannels; ++i)
         channelStrips[i]->setBounds(area.removeFromLeft(channelWidth).reduced(3));
+
+    // In free version, remaining space shows branding logo
+    if constexpr (kFreeVersion)
+        freeLogoArea = area;
+    else
+        freeLogoArea = {};
 }
 
 //==============================================================================
@@ -312,8 +361,8 @@ bool MainComponent::keyPressed(const juce::KeyPress& key, juce::Component*)
         return true;
     }
 
-    // 1-6 — set active channel and trigger it
-    if (code >= '1' && code <= '6')
+    // 1-N — set active channel and trigger it
+    if (code >= '1' && code <= ('0' + kMaxChannels))
     {
         const int ch = code - '1';
         audioEngine.setActiveChannel(ch);
@@ -421,6 +470,13 @@ void MainComponent::triggerChannel(int channelIndex)
         }
     }
 
+    // Auto-start global play when triggering playback on a channel
+    const auto ensurePlaying = [this]()
+    {
+        if (!audioEngine.isPlaying())
+            audioEngine.setPlaying(true);
+    };
+
     if (overdubMode && state == ChannelState::Playing)
     {
         Command cmd;
@@ -433,11 +489,17 @@ void MainComponent::triggerChannel(int channelIndex)
     else if (state == ChannelState::Recording)
         audioEngine.sendCommand(Command::stopRecord(channelIndex));
     else if (!hasLoop)
+    {
+        ensurePlaying();
         audioEngine.sendCommand(Command::startRecord(channelIndex));
+    }
     else if (state == ChannelState::Playing)
         audioEngine.sendCommand(Command::stopPlayback(channelIndex));
     else
+    {
+        ensurePlaying();
         audioEngine.sendCommand(Command::startPlayback(channelIndex));
+    }
 }
 
 //==============================================================================
@@ -458,13 +520,19 @@ void MainComponent::loadPreferences()
 
     const auto json = juce::JSON::parse(file.loadFileAsString());
     if (const auto* obj = json.getDynamicObject())
+    {
         autoRecallLastSession = (bool)obj->getProperty("auto_recall_last_session");
+        defaultTemplatePath   = obj->getProperty("default_template_path").toString();
+        masterRecordPath      = obj->getProperty("master_record_path").toString();
+    }
 }
 
 void MainComponent::savePreferences()
 {
     auto* obj = new juce::DynamicObject();
     obj->setProperty("auto_recall_last_session", autoRecallLastSession);
+    obj->setProperty("default_template_path",    defaultTemplatePath);
+    obj->setProperty("master_record_path",       masterRecordPath);
 
     const auto file = getPreferencesFile();
     file.getParentDirectory().createDirectory();
@@ -480,9 +548,12 @@ void MainComponent::showHelpMenu()
     juce::PopupMenu menu;
     menu.addItem(1, "Show shortcuts");
     menu.addItem(2, "Show MIDI mappings");
+    menu.addSeparator();
+    menu.addItem(3, "About");
     menu.showMenuAsync({}, [this](int id) {
         if (id == 1) showShortcutsDialog();
         if (id == 2) showMidiMappingsDialog();
+        if (id == 3) showAboutDialog();
     });
 }
 
@@ -557,6 +628,22 @@ void MainComponent::showMidiMappingsDialog()
         juce::AlertWindow::InfoIcon,
         "MIDI Mappings",
         text.trimEnd());
+}
+
+void MainComponent::showAboutDialog()
+{
+    const juce::String version = juce::JUCEApplication::getInstance()->getApplicationVersion();
+    const juce::String text =
+        "chief v" + version + "\n"
+        "6-Channel Audio Looper\n\n"
+        "Made with JUCE (https://juce.com)\n\n"
+        "ASIO is a trademark and software of Steinberg Media Technologies GmbH\n\n"
+        "VST is a trademark of Steinberg Media Technologies GmbH";
+
+    juce::AlertWindow::showMessageBoxAsync(
+        juce::AlertWindow::InfoIcon,
+        "About chief",
+        text);
 }
 
 //==============================================================================

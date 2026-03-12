@@ -24,13 +24,16 @@ class MainComponent : public juce::Component,
                       private juce::Timer
 {
 public:
-    MainComponent();
+    MainComponent(std::function<void(const juce::String&)> splashCallback = nullptr);
     ~MainComponent() override;
 
     void paint  (juce::Graphics& g) override;
     void resized() override;
 
     AudioEngine& getAudioEngine() { return audioEngine; }
+
+    /** Splash screen status callback — set by Main.cpp before audio init. */
+    std::function<void(const juce::String&)> onSplashStatus;
 
 private:
     //==========================================================================
@@ -51,6 +54,7 @@ private:
     juce::TextButton helpButton           {"? Help"};
     juce::Image      logo;
     juce::Rectangle<int> logoArea;
+    juce::Rectangle<int> freeLogoArea;    // empty space in free version for branding
     juce::Rectangle<int> progressBarArea; // 8px bar below channels showing loop progress
 
     juce::TooltipWindow tooltipWindow {this, 600};  // 600 ms hover delay
@@ -69,6 +73,8 @@ private:
 
     // Preferences persistence
     bool autoRecallLastSession {false};
+    juce::String defaultTemplatePath;
+    juce::String masterRecordPath;
     void loadPreferences();
     void savePreferences();
     juce::File getPreferencesFile() const;
@@ -77,6 +83,7 @@ private:
     void showHelpMenu();
     void showShortcutsDialog();
     void showMidiMappingsDialog();
+    void showAboutDialog();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

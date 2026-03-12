@@ -1,4 +1,5 @@
 #include "ShowComponent.h"
+#include "AppConfig.h"
 
 //==============================================================================
 ShowComponent::ShowComponent(AudioEngine& engine,
@@ -9,11 +10,15 @@ ShowComponent::ShowComponent(AudioEngine& engine,
     , showManager(showMgr)
 {
     //--------------------------------------------------------------------------
-    // Load button — opens context menu
+    // New button — context menu
+    newButton.onClick = [this] { showNewMenu(); };
+    addAndMakeVisible(newButton);
+
+    // Load button — context menu
     loadButton.onClick = [this] { showLoadMenu(); };
     addAndMakeVisible(loadButton);
 
-    // Save button — opens context menu
+    // Save button — context menu
     saveButton.onClick = [this] { showSaveMenu(); };
     addAndMakeVisible(saveButton);
 
@@ -40,15 +45,16 @@ ShowComponent::ShowComponent(AudioEngine& engine,
     //--------------------------------------------------------------------------
     // Add to show
     addToShowButton.onClick = [this] { addToShowClicked(); };
-    addToShowButton.setEnabled(false);  // only when a show is loaded
-    addAndMakeVisible(addToShowButton);
+    addToShowButton.setEnabled(false);
+    if (!kFreeVersion)
+        addAndMakeVisible(addToShowButton);
 
     // Wire MIDI song-navigation callbacks
     audioEngine.getMidiLearnManager().onNextSong = [this] { nextSongClicked(); };
     audioEngine.getMidiLearnManager().onPrevSong = [this] { prevSongClicked(); };
 
     updateSongPositionLabel();
-    startTimer(500);  // 2 Hz — just for label refresh
+    startTimer(500);
 }
 
 ShowComponent::~ShowComponent() { stopTimer(); }
@@ -60,8 +66,7 @@ void ShowComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colours::darkgrey);
     g.drawRect(getLocalBounds(), 1);
 
-    // Separator between show section and song navigation
-    const int sep1 = 270;
+    const int sep1 = 300;
     g.setColour(juce::Colours::grey.withAlpha(0.4f));
     g.drawVerticalLine(sep1, 4.0f, static_cast<float>(getHeight() - 4));
 }
@@ -70,30 +75,35 @@ void ShowComponent::resized()
 {
     auto area = getLocalBounds().reduced(4, 2);
 
-    // --- Show section (left) ---
-    auto showSection = area.removeFromLeft(260);
-    loadButton.setBounds(showSection.removeFromLeft(70).reduced(2));
-    saveButton.setBounds(showSection.removeFromLeft(70).reduced(2));
-    showNameLabel .setBounds(showSection.reduced(2));
-
-    area.removeFromLeft(10);  // gap after separator
-
-    // --- Song navigation (centre) ---
-    auto navSection = area.removeFromLeft(320);
-    prevSongButton    .setBounds(navSection.removeFromLeft(36).reduced(2));
-    nextSongButton    .setBounds(navSection.removeFromRight(36).reduced(2));
-    songPositionLabel .setBounds(navSection.reduced(2));
+    // --- Left: New / Load / Save + show name ---
+    auto showSection = area.removeFromLeft(290);
+    newButton .setBounds(showSection.removeFromLeft(55).reduced(2));
+    loadButton.setBounds(showSection.removeFromLeft(55).reduced(2));
+    saveButton.setBounds(showSection.removeFromLeft(55).reduced(2));
+    showNameLabel.setBounds(showSection.reduced(2));
 
     area.removeFromLeft(10);
 
-    // --- Individual song (right) ---
-    addToShowButton .setBounds(area.removeFromLeft(70).reduced(2));
+    // --- Centre: song navigation ---
+    auto navSection = area.removeFromLeft(320);
+    prevSongButton   .setBounds(navSection.removeFromLeft(36).reduced(2));
+    nextSongButton   .setBounds(navSection.removeFromRight(36).reduced(2));
+    songPositionLabel.setBounds(navSection.reduced(2));
+
+    area.removeFromLeft(10);
+
+    // --- Right: + Show ---
+    if (!kFreeVersion)
+        addToShowButton.setBounds(area.removeFromLeft(70).reduced(2));
 }
 
 //==============================================================================
 void ShowComponent::timerCallback()
 {
     updateSongPositionLabel();
+
+    // Enable +Show only when a show is loaded
+    addToShowButton.setEnabled(showLoaded);
 }
 
 void ShowComponent::updateSongPositionLabel()
@@ -110,14 +120,14 @@ void ShowComponent::updateSongPositionLabel()
 
     if (currentSongIndex < 0)
     {
-        songPositionLabel.setText("— / " + juce::String(total) + " songs",
+        songPositionLabel.setText(juce::String::charToString(0x2014) + " / " +
+                                  juce::String(total) + " songs",
                                   juce::dontSendNotification);
     }
     else
     {
         const auto& entry = currentShow.songPaths[currentSongIndex];
         const juce::String name = entry.getFileName();
-
         songPositionLabel.setText(
             juce::String(currentSongIndex + 1) + "/" + juce::String(total) +
             ": " + name,
@@ -132,10 +142,24 @@ void ShowComponent::updateSongPositionLabel()
 // Context menus
 //==============================================================================
 
+void ShowComponent::showNewMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem(1, "New Song");
+    menu.addItem(2, "New Show", !kFreeVersion);
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&newButton),
+                       [this](int id)
+    {
+        if (id == 1) newSongClicked();
+        else if (id == 2) newShowClicked();
+    });
+}
+
 void ShowComponent::showLoadMenu()
 {
     juce::PopupMenu menu;
-    menu.addItem(1, "Load Show");
+    menu.addItem(1, "Load Show", !kFreeVersion);
     menu.addItem(2, "Load Song");
     menu.addItem(3, "Load Song Template");
 
@@ -151,9 +175,11 @@ void ShowComponent::showLoadMenu()
 void ShowComponent::showSaveMenu()
 {
     juce::PopupMenu menu;
-    menu.addItem(1, "Save Show", showLoaded);
+    menu.addItem(1, "Save Show", showLoaded && !kFreeVersion);
     menu.addItem(2, "Save Song");
     menu.addItem(3, "Save Song Template");
+    menu.addSeparator();
+    menu.addItem(4, "Save as Default Template");
 
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&saveButton),
                        [this](int id)
@@ -161,7 +187,48 @@ void ShowComponent::showSaveMenu()
         if (id == 1) saveShowClicked();
         else if (id == 2) saveSongClicked();
         else if (id == 3) saveSongTemplateClicked();
+        else if (id == 4) saveAsDefaultTemplateClicked();
     });
+}
+
+//==============================================================================
+// New handlers
+//==============================================================================
+
+void ShowComponent::newSongClicked()
+{
+    if (!audioIsReady) return;
+
+    // Reset everything first
+    audioEngine.setPlaying(false);
+    audioEngine.resetSong();
+
+    // Apply default template if one is configured
+    if (getDefaultTemplatePath)
+    {
+        const auto path = getDefaultTemplatePath();
+        if (path.isNotEmpty())
+        {
+            auto tmplFile = juce::File(path);
+            if (tmplFile.existsAsFile())
+            {
+                Song song;
+                auto result = songManager.loadSong(tmplFile, song);
+                if (result.wasOk())
+                    songManager.applySongTemplateToEngine(song, audioEngine);
+            }
+        }
+    }
+}
+
+void ShowComponent::newShowClicked()
+{
+    currentShow = Show();
+    showLoaded = true;
+    currentSongIndex = -1;
+    showNameLabel.setText("New Show", juce::dontSendNotification);
+    addToShowButton.setEnabled(true);
+    updateSongPositionLabel();
 }
 
 //==============================================================================
@@ -171,9 +238,7 @@ void ShowComponent::showSaveMenu()
 void ShowComponent::loadShowClicked()
 {
     fileChooser = std::make_unique<juce::FileChooser>(
-        "Load Show",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
-        "show.json");
+        "Load Show", getLastLocation(), "show.json");
 
     const auto flags = juce::FileBrowserComponent::openMode |
                        juce::FileBrowserComponent::canSelectFiles;
@@ -182,6 +247,8 @@ void ShowComponent::loadShowClicked()
     {
         auto file = chooser.getResult();
         if (!file.existsAsFile()) return;
+
+        lastBrowseLocation = file.getParentDirectory();
 
         Show loaded;
         const auto result = showManager.loadShow(file, loaded);
@@ -202,7 +269,6 @@ void ShowComponent::loadShowClicked()
         addToShowButton.setEnabled(true);
         updateSongPositionLabel();
 
-        // Auto-load first song if available
         if (!currentShow.songPaths.isEmpty())
             loadAndApplySong(0);
     });
@@ -213,8 +279,7 @@ void ShowComponent::saveShowClicked()
     if (!showLoaded) return;
 
     fileChooser = std::make_unique<juce::FileChooser>(
-        "Save Show As",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
+        "Save Show As", getLastLocation());
 
     const auto flags = juce::FileBrowserComponent::saveMode |
                        juce::FileBrowserComponent::canSelectDirectories;
@@ -222,12 +287,14 @@ void ShowComponent::saveShowClicked()
     fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
     {
         auto dir = chooser.getResult();
-        if (dir.getFullPathName().isEmpty()) return;   // user cancelled
-        dir.createDirectory();                         // create if not yet existing
+        if (dir.getFullPathName().isEmpty()) return;
+        dir.createDirectory();
         if (!dir.isDirectory()) return;
 
+        lastBrowseLocation = dir;
+
         auto showFile = dir.getChildFile("show.json");
-        currentShow.showFile = showFile;  // update so relative paths are computed from new location
+        currentShow.showFile = showFile;
         const auto result = showManager.saveShow(currentShow, showFile);
 
         if (!result.wasOk())
@@ -246,7 +313,6 @@ void ShowComponent::saveShowClicked()
 void ShowComponent::prevSongClicked()
 {
     if (!showLoaded || currentShow.songPaths.isEmpty()) return;
-
     const int total = currentShow.songPaths.size();
     const int next  = (currentSongIndex <= 0) ? total - 1 : currentSongIndex - 1;
     loadAndApplySong(next);
@@ -255,7 +321,6 @@ void ShowComponent::prevSongClicked()
 void ShowComponent::nextSongClicked()
 {
     if (!showLoaded || currentShow.songPaths.isEmpty()) return;
-
     const int total = currentShow.songPaths.size();
     const int next  = (currentSongIndex >= total - 1) ? 0 : currentSongIndex + 1;
     loadAndApplySong(next);
@@ -263,8 +328,7 @@ void ShowComponent::nextSongClicked()
 
 void ShowComponent::mouseDown(const juce::MouseEvent& e)
 {
-    if (!e.mods.isRightButtonDown())
-        return;
+    if (!e.mods.isRightButtonDown()) return;
 
     auto pos = e.getPosition();
     auto hit = [&](juce::Component& c) { return c.getBounds().contains(pos); };
@@ -286,10 +350,8 @@ void ShowComponent::showMidiContextMenu(MidiControlTarget target)
     menu.showMenuAsync(juce::PopupMenu::Options(), [this, target](int id)
     {
         auto& mlm = audioEngine.getMidiLearnManager();
-        if (id == 1)
-            mlm.startLearning(-1, target);
-        else if (id == 2)
-            mlm.removeMapping(-1, target);
+        if (id == 1) mlm.startLearning(-1, target);
+        else if (id == 2) mlm.removeMapping(-1, target);
     });
 }
 
@@ -336,6 +398,7 @@ bool ShowComponent::loadAndApplySong(int showSongIndex)
         return false;
     }
 
+    lastBrowseLocation = songDir;
     currentSongIndex = showSongIndex;
     updateSongPositionLabel();
     return true;
@@ -356,21 +419,20 @@ void ShowComponent::loadSongClicked()
     }
 
     fileChooser = std::make_unique<juce::FileChooser>(
-        "Load Song",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
-        "song.json");
+        "Load Song", getLastLocation(), "song.json");
 
-    const auto flags = juce::FileBrowserComponent::openMode |
-                       juce::FileBrowserComponent::canSelectFiles;
+    const auto fcFlags = juce::FileBrowserComponent::openMode |
+                         juce::FileBrowserComponent::canSelectFiles;
 
-    fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+    fileChooser->launchAsync(fcFlags, [this](const juce::FileChooser& chooser)
     {
         auto file = chooser.getResult();
         if (!file.existsAsFile()) return;
 
+        lastBrowseLocation = file.getParentDirectory();
+
         Song song;
         auto result = songManager.loadSong(file, song);
-
         if (result.wasOk())
             result = songManager.applySongToEngine(song, audioEngine);
 
@@ -385,28 +447,24 @@ void ShowComponent::loadSongClicked()
 
 void ShowComponent::saveSongClicked()
 {
-    // Open a save dialog: user types the song name (e.g. "MySong").
-    // A subfolder with that name is created inside the chosen parent directory.
     fileChooser = std::make_unique<juce::FileChooser>(
-        "Save Song – Enter Song Name",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-            .getChildFile("MySong"),
-        "");
+        "Save Song", getLastLocation().getChildFile("MySong"), "");
 
-    const auto flags = juce::FileBrowserComponent::saveMode;
+    const auto fcFlags = juce::FileBrowserComponent::saveMode;
 
-    fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+    fileChooser->launchAsync(fcFlags, [this](const juce::FileChooser& chooser)
     {
         const auto result = chooser.getResult();
-        if (result.getFullPathName().isEmpty()) return;   // user cancelled
+        if (result.getFullPathName().isEmpty()) return;
 
         const juce::String songName = result.getFileNameWithoutExtension();
         if (songName.isEmpty()) return;
 
-        // Create a subfolder named after the song inside the chosen parent dir
         auto dir = result.getParentDirectory().getChildFile(songName);
         dir.createDirectory();
         if (!dir.isDirectory()) return;
+
+        lastBrowseLocation = dir.getParentDirectory();
 
         Song song;
         song.songName      = songName;
@@ -438,21 +496,20 @@ void ShowComponent::loadSongTemplateClicked()
     }
 
     fileChooser = std::make_unique<juce::FileChooser>(
-        "Load Song Template",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
-        "song.json");
+        "Load Song Template", getLastLocation(), "*.tmpl");
 
-    const auto flags = juce::FileBrowserComponent::openMode |
-                       juce::FileBrowserComponent::canSelectFiles;
+    const auto fcFlags = juce::FileBrowserComponent::openMode |
+                         juce::FileBrowserComponent::canSelectFiles;
 
-    fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+    fileChooser->launchAsync(fcFlags, [this](const juce::FileChooser& chooser)
     {
         auto file = chooser.getResult();
         if (!file.existsAsFile()) return;
 
+        lastBrowseLocation = file.getParentDirectory();
+
         Song song;
         auto result = songManager.loadSong(file, song);
-
         if (result.wasOk())
             result = songManager.applySongTemplateToEngine(song, audioEngine);
 
@@ -468,28 +525,25 @@ void ShowComponent::loadSongTemplateClicked()
 void ShowComponent::saveSongTemplateClicked()
 {
     fileChooser = std::make_unique<juce::FileChooser>(
-        "Save Song Template – Enter Name",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-            .getChildFile("MyTemplate"),
-        "");
+        "Save Song Template", getLastLocation().getChildFile("MyTemplate.tmpl"), "*.tmpl");
 
-    const auto flags = juce::FileBrowserComponent::saveMode;
+    const auto fcFlags = juce::FileBrowserComponent::saveMode;
 
-    fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+    fileChooser->launchAsync(fcFlags, [this](const juce::FileChooser& chooser)
     {
         const auto result = chooser.getResult();
         if (result.getFullPathName().isEmpty()) return;
 
-        const juce::String templateName = result.getFileNameWithoutExtension();
-        if (templateName.isEmpty()) return;
+        lastBrowseLocation = result.getParentDirectory();
 
-        auto dir = result.getParentDirectory().getChildFile(templateName);
-        dir.createDirectory();
-        if (!dir.isDirectory()) return;
+        // Ensure .tmpl extension
+        auto tmplFile = result.hasFileExtension(".tmpl")
+            ? result
+            : result.withFileExtension(".tmpl");
 
         Song song;
-        song.songName      = templateName;
-        song.songDirectory = dir;
+        song.songName      = tmplFile.getFileNameWithoutExtension();
+        song.songDirectory  = tmplFile.getParentDirectory();
 
         const auto saveResult = songManager.saveSongTemplate(song, audioEngine);
 
@@ -502,22 +556,49 @@ void ShowComponent::saveSongTemplateClicked()
     });
 }
 
+void ShowComponent::saveAsDefaultTemplateClicked()
+{
+    // Save to a fixed location in the app data directory
+    auto tmplFile = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                        .getChildFile("chief")
+                        .getChildFile("default_template.tmpl");
+    tmplFile.getParentDirectory().createDirectory();
+
+    Song song;
+    song.songName      = "default_template";
+    song.songDirectory  = tmplFile.getParentDirectory();
+
+    const auto result = songManager.saveSongTemplate(song, audioEngine);
+
+    if (result.wasOk())
+    {
+        if (setDefaultTemplatePath)
+            setDefaultTemplatePath(tmplFile.getFullPathName());
+    }
+    else
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon, "Save Default Template",
+            "Failed to save: " + result.getErrorMessage());
+    }
+}
+
 void ShowComponent::addToShowClicked()
 {
     if (!showLoaded) return;
 
     fileChooser = std::make_unique<juce::FileChooser>(
-        "Select Song Directory to Add to Show",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
+        "Select Song Directory to Add to Show", getLastLocation());
 
-    const auto flags = juce::FileBrowserComponent::openMode |
-                       juce::FileBrowserComponent::canSelectDirectories;
+    const auto fcFlags = juce::FileBrowserComponent::openMode |
+                         juce::FileBrowserComponent::canSelectDirectories;
 
-    fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+    fileChooser->launchAsync(fcFlags, [this](const juce::FileChooser& chooser)
     {
         auto dir = chooser.getResult();
         if (!dir.isDirectory()) return;
 
+        lastBrowseLocation = dir.getParentDirectory();
         currentShow.addSong(dir);
         updateSongPositionLabel();
     });

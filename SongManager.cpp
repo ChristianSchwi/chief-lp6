@@ -915,11 +915,8 @@ juce::Result SongManager::saveSongTemplate(Song& song, AudioEngine& audioEngine)
 {
     song.lastModified = juce::Time::getCurrentTime();
 
-    auto result = song.createDirectory();
-    if (result.failed()) return result;
-
-    // Global state (same as saveSong)
-    song.loopLengthSamples     = 0;  // templates have no loop length
+    // Global state
+    song.loopLengthSamples     = 0;
     song.bpm                   = audioEngine.getLoopEngine().getBPM();
     song.beatsPerLoop          = audioEngine.getLoopEngine().getBeatsPerLoop();
     song.latchModeEnabled      = audioEngine.isLatchMode();
@@ -932,12 +929,10 @@ juce::Result SongManager::saveSongTemplate(Song& song, AudioEngine& audioEngine)
     song.fixedLengthBars       = audioEngine.getFixedLengthBars();
     song.masterGain            = audioEngine.getMasterGain();
 
-    // Section state — no loop lengths in template
     song.activeSection = 0;
     for (int s = 0; s < NUM_SECTIONS; ++s)
         song.sectionLoopLengths[s] = 0;
 
-    // Channel settings (no loop data)
     for (int i = 0; i < 6; ++i)
     {
         auto* channel = audioEngine.getChannel(i);
@@ -945,7 +940,6 @@ juce::Result SongManager::saveSongTemplate(Song& song, AudioEngine& audioEngine)
 
         song.channels[i] = readChannelState(channel, audioEngine, i);
 
-        // Clear all section loop data — template has no recordings
         for (int s = 0; s < NUM_SECTIONS; ++s)
         {
             song.channels[i].sectionData[s].hasLoopData = false;
@@ -955,16 +949,18 @@ juce::Result SongManager::saveSongTemplate(Song& song, AudioEngine& audioEngine)
     }
 
     auto json       = songToJSON(song);
-    auto songFile   = song.getSongFile();
     auto jsonString = juce::JSON::toString(json, true);
 
-    auto tmpJsonFile = songFile.getSiblingFile(songFile.getFileName() + ".tmp");
-    if (!tmpJsonFile.replaceWithText(jsonString))
-        return juce::Result::fail("Failed to write temp song.json: " + tmpJsonFile.getFullPathName());
-    if (!tmpJsonFile.moveFileTo(songFile))
-        return juce::Result::fail("Failed to rename temp song.json: " + tmpJsonFile.getFullPathName());
+    // Save as a single .tmpl file (JSON) in songDirectory
+    auto tmplFile = song.songDirectory.getChildFile(song.songName + ".tmpl");
+    auto tmpFile  = tmplFile.getSiblingFile(tmplFile.getFileName() + ".tmp");
 
-    DBG("Song template saved: " + songFile.getFullPathName());
+    if (!tmpFile.replaceWithText(jsonString))
+        return juce::Result::fail("Failed to write: " + tmpFile.getFullPathName());
+    if (!tmpFile.moveFileTo(tmplFile))
+        return juce::Result::fail("Failed to rename: " + tmpFile.getFullPathName());
+
+    DBG("Song template saved: " + tmplFile.getFullPathName());
     return juce::Result::ok();
 }
 

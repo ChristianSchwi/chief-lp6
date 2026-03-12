@@ -1301,6 +1301,10 @@ void AudioEngine::loadPluginAsync(int channelIndex,
         " slot " + juce::String(slotIndex) +
         (stateBase64.isNotEmpty() ? " (with saved state)" : ""));
 
+    ++pendingPluginLoads;
+    if (onPluginLoadStart)
+        onPluginLoadStart(channelIndex, slotIndex, description.name);
+
     pluginHost->loadPluginAsync(
         description,
         currentSampleRate,
@@ -1310,6 +1314,7 @@ void AudioEngine::loadPluginAsync(int channelIndex,
         {
             if (!plugin)
             {
+                --pendingPluginLoads;
                 DBG("loadPluginAsync: failed — " + error);
                 if (onPluginLoadError)
                     onPluginLoadError(channelIndex, slotIndex,
@@ -1325,6 +1330,8 @@ void AudioEngine::loadPluginAsync(int channelIndex,
                     DBG("loadPluginAsync: state restore failed — ch " +
                         juce::String(channelIndex) + " slot " + juce::String(slotIndex));
             }
+
+            --pendingPluginLoads;
 
             auto* channel = channels[channelIndex].get();
             if (!channel)
