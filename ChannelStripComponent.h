@@ -4,6 +4,7 @@
 #include "AudioEngine.h"
 #include "ContextMenuControls.h"
 #include "LevelMeterComponent.h"
+#include "CustomLookAndFeel.h"
 
 //==============================================================================
 /**
@@ -67,6 +68,9 @@ private:
     juce::Label      channelLabel;
     juce::Label      stateLabel;
 
+    FaderSliderLookAndFeel faderLnF;
+    SquareButtonLookAndFeel squareBtnLnF;
+    FolderIconButtonLookAndFeel folderBtnLnF;
     int muteGrpHeaderY = 0;
 
     //==========================================================================

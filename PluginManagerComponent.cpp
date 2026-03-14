@@ -52,7 +52,7 @@ PluginSlotRow::PluginSlotRow(AudioEngine& engine, int channelIndex, int slotInde
     addAndMakeVisible(editButton);
 
     // Remove-Button
-    removeButton.setTooltip("Plugin entfernen");
+    removeButton.setTooltip("Remove plugin");
     removeButton.onClick = [this] { removePlugin(); };
     addAndMakeVisible(removeButton);
 

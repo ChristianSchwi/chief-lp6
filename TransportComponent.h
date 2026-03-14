@@ -44,14 +44,14 @@ public:
 private:
     AudioEngine& audioEngine;
 
-    struct SectionHeader { int y; const char* label; };
+    struct SectionHeader { int y; int height; const char* label; };
     juce::Array<SectionHeader> sectionHeaders;
 
     //==========================================================================
     // Transport
     ContextMenuButton       playStopButton    {"Play"};
     ContextMenuButton       panicButton       {"PANIC"};
-    ContextMenuToggleButton overdubButton     {"Overdub Mode"};
+    ContextMenuToggleButton overdubButton     {"Overdub"};
 
     // Master volume
     juce::Label  masterGainLabel {"", "Master:"};
@@ -69,7 +69,7 @@ private:
     juce::Label        bpmLabel   {"", "BPM:"};
     juce::TextEditor   bpmEditor;
     ContextMenuButton  tapButton  {"Tap"};
-    ContextMenuToggleButton latchModeButton{"Latch Mode"};
+    ContextMenuToggleButton latchModeButton{"Latch"};
 
     //==========================================================================
     // Metronome
@@ -99,10 +99,10 @@ private:
 
     //==========================================================================
     // Loop manipulation
-    ContextMenuButton doubleLoopButton{"Double Loop"};
+    ContextMenuButton doubleLoopButton{"x2"};
 
     // Master Recording
-    ContextMenuButton masterRecordButton {"Rec Master"};
+    ContextMenuButton masterRecordButton {"Rec"};
 
     // Reset
     juce::TextButton resetButton{"Reset"};
@@ -117,6 +117,7 @@ private:
 
     //==========================================================================
     FilledBarSliderLookAndFeel filledBarLnF;
+    SquareButtonLookAndFeel squareBtnLnF;
 
     bool lastHasRecordings { false };
     std::vector<juce::int64> tapTimes;

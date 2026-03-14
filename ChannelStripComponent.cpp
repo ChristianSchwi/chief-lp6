@@ -10,7 +10,7 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     //--------------------------------------------------------------------------
     // Channel label — double-click to rename
     channelLabel.setText(audioEngine.getChannelName(index), juce::dontSendNotification);
-    channelLabel.setFont(juce::Font(14.0f, juce::Font::bold));
+    channelLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     channelLabel.setJustificationType(juce::Justification::centred);
     channelLabel.setEditable(false, true, false);   // double-click to edit
     channelLabel.setInterceptsMouseClicks(true, false);
@@ -103,7 +103,8 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     gainSlider.setSliderStyle(juce::Slider::LinearVertical);
     gainSlider.setRange(-60.0, 12.0, 0.1);
     gainSlider.setValue(0.0, juce::dontSendNotification);
-    gainSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 16);
+    gainSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 120, 22);
+    gainSlider.setLookAndFeel(&faderLnF);
     gainSlider.onValueChange = [this] { gainChanged(); };
     gainSlider.addMouseListener(this, false);
     addAndMakeVisible(gainSlider);
@@ -127,8 +128,9 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     // Mute group assignment buttons
     for (int g = 0; g < kMaxMuteGroups; ++g)
     {
-        muteGroupButtons[g].setButtonText(juce::String(g + 1));
+        muteGroupButtons[g].setButtonText("G" + juce::String(g + 1));
         muteGroupButtons[g].setClickingTogglesState(false);
+        muteGroupButtons[g].setLookAndFeel(&squareBtnLnF);
         muteGroupButtons[g].setColour(juce::TextButton::buttonOnColourId, juce::Colours::orange);
         muteGroupButtons[g].setTooltip("Assign to mute group " + juce::String(g + 1));
         muteGroupButtons[g].onClick = [this, g]
@@ -143,17 +145,26 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     oneShotButton.setButtonText("Oneshot");
     oneShotButton.setClickingTogglesState(true);
     oneShotButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::cyan);
-    oneShotButton.setTooltip("One-shot: channel stops automatically after one full loop playback.");
+    oneShotButton.setTooltip("One-shot: channel records and plays independently from transport.");
     oneShotButton.onClick = [this]
     {
         auto* channel = audioEngine.getChannel(channelIndex);
-        if (channel) channel->setOneShot(oneShotButton.getToggleState());
+        if (!channel) return;
+        bool wantOneShot = oneShotButton.getToggleState();
+        if (wantOneShot && channel->hasContentInAnySection())
+        {
+            oneShotButton.setToggleState(false, juce::dontSendNotification);
+            return;
+        }
+        channel->setOneShot(wantOneShot);
     };
-    addAndMakeVisible(oneShotButton);
+    if (!kFreeVersion)
+        addAndMakeVisible(oneShotButton);
 
     // Open file button
     openFileButton.setButtonText("Load File");
     openFileButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
+    openFileButton.setLookAndFeel(&folderBtnLnF);
     openFileButton.setTooltip("Import an audio file (WAV/AIFF/FLAC/MP3) into this channel's loop.");
     openFileButton.onClick = [this] { openFileClicked(); };
     addAndMakeVisible(openFileButton);
@@ -161,12 +172,29 @@ ChannelStripComponent::ChannelStripComponent(AudioEngine& engine, int index)
     addAndMakeVisible(inputMeter);
     addAndMakeVisible(loopMeter);
 
+    // Prevent child controls from stealing keyboard focus (arrow key navigation)
+    clrButton.setWantsKeyboardFocus(false);
+    undoButton.setWantsKeyboardFocus(false);
+    ioButton.setWantsKeyboardFocus(false);
+    fxButton.setWantsKeyboardFocus(false);
+    gainSlider.setWantsKeyboardFocus(false);
+    muteButton.setWantsKeyboardFocus(false);
+    soloButton.setWantsKeyboardFocus(false);
+    openFileButton.setWantsKeyboardFocus(false);
+    oneShotButton.setWantsKeyboardFocus(false);
+    for (int g = 0; g < kMaxMuteGroups; ++g)
+        muteGroupButtons[g].setWantsKeyboardFocus(false);
+
     updateMainButton();
     startTimer(100);  // 10 Hz
 }
 
 ChannelStripComponent::~ChannelStripComponent()
 {
+    gainSlider.setLookAndFeel(nullptr);
+    openFileButton.setLookAndFeel(nullptr);
+    for (int g = 0; g < kMaxMuteGroups; ++g)
+        muteGroupButtons[g].setLookAndFeel(nullptr);
     stopTimer();
 }
 
@@ -185,6 +213,36 @@ void ChannelStripComponent::paint(juce::Graphics& g)
     {
         g.setColour(juce::Colours::darkgrey);
         g.drawRect(getLocalBounds(), 1);
+    }
+
+    // dB scale to the left of meters
+    {
+        const auto meterBounds = inputMeter.getBounds().toFloat();
+        const float meterTop = meterBounds.getY() + 1.0f;
+        const float meterBot = meterBounds.getBottom() - 1.0f;
+        const float meterH = meterBot - meterTop;
+        const float scaleRight = meterBounds.getX() - 1.0f;
+
+        g.setFont(juce::Font(8.0f));
+        g.setColour(juce::Colour(0xFF888888));
+
+        const float dbValues[] = { 0.0f, -6.0f, -12.0f, -18.0f, -24.0f, -30.0f, -36.0f, -42.0f, -48.0f, -54.0f };
+        const float minDb = -60.0f;
+
+        for (float db : dbValues)
+        {
+            const float norm = (db - minDb) / (0.0f - minDb);
+            const float yPos = meterBot - meterH * norm;
+
+            // Tick mark
+            g.drawHorizontalLine((int)yPos, scaleRight - 4.0f, scaleRight);
+
+            // Label
+            juce::String label = (db == 0.0f) ? "0" : juce::String((int)db);
+            g.drawText(label,
+                       juce::Rectangle<float>(scaleRight - 28.0f, yPos - 5.0f, 23.0f, 10.0f),
+                       juce::Justification::centredRight, false);
+        }
     }
 
     // Mute group section header
@@ -214,7 +272,7 @@ void ChannelStripComponent::resized()
 {
     auto area = getLocalBounds().reduced(6);
 
-    channelLabel.setBounds(area.removeFromTop(20));
+    channelLabel.setBounds(area.removeFromTop(24));
     stateLabel  .setBounds(area.removeFromTop(16));
     area.removeFromTop(4);
 
@@ -243,9 +301,16 @@ void ChannelStripComponent::resized()
     // Reserve bottom for FILE + Oneshot (one row) + mute group section
     {
         auto fileRow = area.removeFromBottom(26);
-        const int half = fileRow.getWidth() / 2;
-        openFileButton.setBounds(fileRow.removeFromLeft(half).reduced(1));
-        oneShotButton .setBounds(fileRow.reduced(1));
+        if constexpr (kFreeVersion)
+        {
+            openFileButton.setBounds(fileRow.reduced(1));
+        }
+        else
+        {
+            const int half = fileRow.getWidth() / 2;
+            openFileButton.setBounds(fileRow.removeFromLeft(half).reduced(1));
+            oneShotButton .setBounds(fileRow.reduced(1));
+        }
     }
     area.removeFromBottom(2);
 
@@ -255,14 +320,29 @@ void ChannelStripComponent::resized()
     muteGrpArea.removeFromTop(18); // 14px header + 4px gap
     const int mgW = muteGrpArea.getWidth() / kMaxMuteGroups;
     for (int g = 0; g < kMaxMuteGroups; ++g)
-        muteGroupButtons[g].setBounds(muteGrpArea.removeFromLeft(mgW).reduced(1));
+        muteGroupButtons[g].setBounds(muteGrpArea.removeFromLeft(mgW));
 
     // Gain slider + meters fill remaining space
-    auto meterArea = area.removeFromRight(38); // 16px + 2px + 16px + 2px + 2px margin
-    meterArea.removeFromRight(2);
-    loopMeter .setBounds(meterArea.removeFromRight(16));
-    meterArea.removeFromRight(2);
-    inputMeter.setBounds(meterArea.removeFromRight(16));
+    // Layout: [scale gap | meters | gap | slider]
+    const int totalW = area.getWidth();
+    const int halfW = totalW / 2;
+
+    // Left half: meters (reduced height, shifted right, thicker, more gap)
+    auto meterZone = area.removeFromLeft(halfW);
+    const int meterW = 14;
+    const int meterGap = 4;
+    const int meterPadV = 12; // top/bottom padding
+    auto meterZoneV = meterZone.reduced(0, meterPadV);
+    // Shift meters toward the right of their zone
+    auto metersBlock = meterZoneV.withSizeKeepingCentre(meterW * 2 + meterGap, meterZoneV.getHeight())
+                                 .withX(meterZone.getRight() - meterW * 2 - meterGap - 4);
+    metersBlock.setHeight(meterZoneV.getHeight());
+    metersBlock.setY(meterZoneV.getY());
+    inputMeter.setBounds(metersBlock.removeFromLeft(meterW));
+    metersBlock.removeFromLeft(meterGap);
+    loopMeter .setBounds(metersBlock.removeFromLeft(meterW));
+
+    // Right half: slider (full width so text box has room)
     gainSlider.setBounds(area);
 }
 
@@ -314,6 +394,7 @@ void ChannelStripComponent::timerCallback()
 
     // Sync one-shot button
     oneShotButton.setToggleState(channel->isOneShot(), juce::dontSendNotification);
+    oneShotButton.setEnabled(!channel->hasContentInAnySection());
 
     // Sync mute group buttons
     const int currentGroup = audioEngine.getChannelMuteGroup(channelIndex);
@@ -349,7 +430,9 @@ void ChannelStripComponent::timerCallback()
     {
         const auto state = channel->getState();
         juce::String stateText;
-        switch (state)
+        if (channel->isOneShot() && state == ChannelState::Idle && channel->isOneShotPlaying())
+            stateText = "ONESHOT";
+        else switch (state)
         {
             case ChannelState::Idle:        stateText = "Idle";    break;
             case ChannelState::Recording:   stateText = "REC";     break;
@@ -421,6 +504,31 @@ void ChannelStripComponent::updateMainButton()
     const bool   overdubMode = audioEngine.isInOverdubMode();
     const auto   state       = channel->getState();
     const bool   hasLoop     = channel->hasLoop();
+
+    // Oneshot channels: simplified button display
+    if (channel->isOneShot())
+    {
+        juce::String label;
+        juce::Colour colour;
+        if (state == ChannelState::Recording)
+        {
+            label  = "STOP REC";
+            colour = juce::Colour(0xFF8B0000);
+        }
+        else if (!hasLoop)
+        {
+            label  = "REC";
+            colour = juce::Colours::red;
+        }
+        else
+        {
+            label  = "TRIGGER";
+            colour = juce::Colours::cyan;
+        }
+        mainButton.setButtonText(label);
+        mainButton.setColour(juce::TextButton::buttonColourId, colour);
+        return;
+    }
 
     // When a section switch is pending (latch mode), show what the button will do
     // in the NEW section — if the channel has no content there, show REC
@@ -504,6 +612,25 @@ void ChannelStripComponent::mainButtonClicked()
     const bool overdubMode = audioEngine.isInOverdubMode();
     const auto state       = channel->getState();
     const bool hasLoop     = channel->hasLoop();
+
+    // Oneshot channels: independent behavior
+    if (channel->isOneShot())
+    {
+        if (state == ChannelState::Recording)
+        {
+            audioEngine.sendCommand(Command::stopRecord(channelIndex));
+        }
+        else if (!hasLoop && state == ChannelState::Idle)
+        {
+            audioEngine.sendCommand(Command::startRecord(channelIndex));
+        }
+        else if (hasLoop)
+        {
+            // Trigger/re-trigger playback (overlapping voices)
+            audioEngine.sendCommand(Command::startPlayback(channelIndex));
+        }
+        return;
+    }
 
     // Latch record-ahead: if a section switch is pending and channel has no content
     // in the pending section, queue recording for when the section activates

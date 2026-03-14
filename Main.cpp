@@ -21,7 +21,7 @@ public:
 
     const juce::String getApplicationVersion() override
     {
-        return "1.0.0";
+        return "2.1.3";
     }
 
     bool moreThanOneInstanceAllowed() override
@@ -92,7 +92,7 @@ public:
         auto* mc = dynamic_cast<MainComponent*>(
             mainWindow ? mainWindow->getContentComponent() : nullptr);
 
-        if (elapsed >= 500 && (!mc || mc->getAudioEngine().getPendingPluginLoads() == 0))
+        if (elapsed >= 100 && (!mc || mc->getAudioEngine().getPendingPluginLoads() == 0))
         {
             stopTimer();
 
@@ -114,10 +114,36 @@ public:
         splashWindow.reset();
         splashComponent.reset();
         mainWindow = nullptr;
+        closingSplashWindow.reset();
+        closingSplash.reset();
     }
 
     void systemRequestedQuit() override
     {
+        // Hide main window first
+        if (mainWindow)
+            mainWindow->setVisible(false);
+
+        // Show a closing splash while the destructor saves state
+        closingSplash = std::make_unique<SplashComponent>();
+        closingSplash->setStatusText("Saving session...");
+        closingSplash->setSize(500, 350);
+
+        closingSplashWindow = std::make_unique<juce::DocumentWindow>(
+            "", juce::Colour(0xFF1A1A1A), 0);
+        closingSplashWindow->setUsingNativeTitleBar(false);
+        closingSplashWindow->setTitleBarHeight(0);
+        closingSplashWindow->setColour(juce::DocumentWindow::backgroundColourId,
+                                       juce::Colour(0xFF1A1A1A));
+        closingSplashWindow->setContentNonOwned(closingSplash.get(), true);
+        closingSplashWindow->centreWithSize(500, 350);
+        closingSplashWindow->setVisible(true);
+        closingSplashWindow->toFront(true);
+
+        // Force repaint so the splash is visible before blocking destructor work
+        if (auto* peer = closingSplashWindow->getPeer())
+            peer->performAnyPendingRepaintsNow();
+
         quit();
     }
 
@@ -164,6 +190,8 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<juce::DocumentWindow> splashWindow;
     std::unique_ptr<SplashComponent> splashComponent;
+    std::unique_ptr<juce::DocumentWindow> closingSplashWindow;
+    std::unique_ptr<SplashComponent> closingSplash;
     juce::uint32 startTime {0};
     juce::uint32 mainCreatedTime {0};
     Phase phase {Phase::WaitingToCreateMain};

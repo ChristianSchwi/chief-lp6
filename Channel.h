@@ -94,6 +94,17 @@ public:
     void        setOneShot(bool enabled)        { oneShot.store(enabled, std::memory_order_release); }
     bool        isOneShot() const               { return oneShot.load(std::memory_order_relaxed); }
 
+    // Oneshot independent playhead + multi-voice
+    void startOneShotRecord();
+    void stopOneShotRecord(juce::int64 recordedSamples);
+    void triggerOneShotPlayback();
+    void stopAllOneShotVoices();
+    juce::int64 getOneShotLength() const   { return oneShotLength.load(std::memory_order_relaxed); }
+    juce::int64 getOneShotPlayhead() const { return oneShotPlayhead.load(std::memory_order_relaxed); }
+    bool isOneShotPlaying() const;
+
+    static constexpr int kMaxOneShotVoices = 8;
+
     //==========================================================================
     // Routing
     //==========================================================================
@@ -232,6 +243,11 @@ protected:
     std::atomic<bool>         playPending    {false};
     std::atomic<bool>         isActiveChannel{false};
     std::atomic<bool>         oneShot        {false};
+
+    // Oneshot: independent playhead and multi-voice overlap
+    std::atomic<juce::int64> oneShotPlayhead {0};
+    std::atomic<juce::int64> oneShotLength   {0};
+    std::array<std::atomic<juce::int64>, 8> oneShotVoices {};  // -1 = inactive
 
     std::atomic<float>       gainLinear  {1.0f};
     std::atomic<MonitorMode> monitorMode {MonitorMode::WhenTrackActive};

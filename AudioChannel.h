@@ -85,6 +85,15 @@ private:
      * @brief Apply channel gain to buffer
      */
     void applyGain(juce::AudioBuffer<float>& buffer, int numSamples);
-    
+
+    /**
+     * @brief Oneshot-specific processing: independent playhead, multi-voice overlap
+     */
+    void processOneShotBlock(const float* const* inputChannelData,
+                             float* const* outputChannelData,
+                             int numSamples,
+                             int numInputChannels,
+                             int numOutputChannels);
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioChannel)
 };

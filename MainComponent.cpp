@@ -231,11 +231,14 @@ void MainComponent::resized()
     // Progress bar — 8px high, spans the channel area (not the transport)
     auto progressRow = area.removeFromBottom(8);
     const int transportWidth = 220;
-    progressRow.removeFromLeft(transportWidth);  // align with channel strips
-    progressBarArea = progressRow;
 
-    // Remaining area: transport (left panel) + 6 channel strips
-    transportComponent.setBounds(area.removeFromLeft(transportWidth).reduced(4));
+    // Transport extends down to include the progress bar row
+    auto transportArea = area.removeFromLeft(transportWidth);
+    transportArea.setHeight(transportArea.getHeight() + progressRow.getHeight());
+    transportComponent.setBounds(transportArea.reduced(4));
+
+    progressRow.removeFromLeft(transportWidth);  // progress bar spans channel strips only
+    progressBarArea = progressRow;
 
     const int channelWidth = area.getWidth() / 6;  // always divide by 6 for consistent strip width
     for (int i = 0; i < kMaxChannels; ++i)

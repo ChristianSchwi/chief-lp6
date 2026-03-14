@@ -1,4 +1,5 @@
 #include "SongManager.h"
+#include "AppConfig.h"
 #include "PluginHostWrapper.h"
 #include "VSTiChannel.h"
 
@@ -59,29 +60,38 @@ juce::Result SongManager::saveSong(Song& song, AudioEngine& audioEngine)
             auto& sd = song.channels[i].sectionData[s];
             const juce::int64 secLoopLen = song.sectionLoopLengths[s];
 
-            if (channel->sectionHasContent(s) && secLoopLen > 0)
+            if constexpr (!kFreeVersion)
             {
-                auto wavFile = song.getWavFile(i, s, wavPrefix);
-                auto mixed = mixDownChannel(channel->getSectionLoopBuffer(s),
-                                            channel->getSectionOverdubLayers(s),
-                                            secLoopLen);
-                auto saveResult = saveWavFile(wavFile, mixed, secLoopLen, song.sampleRate);
-
-                if (saveResult.failed())
+                if (channel->sectionHasContent(s) && secLoopLen > 0)
                 {
-                    DBG("WARNING: WAV save failed for ch " + juce::String(i) +
-                        " sec " + juce::String(s) + ": " + saveResult.getErrorMessage());
-                    sd.hasLoopData = false;
-                    sd.loopFileName = {};
+                    auto wavFile = song.getWavFile(i, s, wavPrefix);
+                    auto mixed = mixDownChannel(channel->getSectionLoopBuffer(s),
+                                                channel->getSectionOverdubLayers(s),
+                                                secLoopLen);
+                    auto saveResult = saveWavFile(wavFile, mixed, secLoopLen, song.sampleRate);
+
+                    if (saveResult.failed())
+                    {
+                        DBG("WARNING: WAV save failed for ch " + juce::String(i) +
+                            " sec " + juce::String(s) + ": " + saveResult.getErrorMessage());
+                        sd.hasLoopData = false;
+                        sd.loopFileName = {};
+                    }
+                    else
+                    {
+                        sd.hasLoopData = true;
+                        sd.loopFileName = wavFile.getFileName();
+                        writtenFiles.add(wavFile.getFileName());
+                    }
+
+                    sd.overdubLayerCount = 0; // overdubs baked into WAV
                 }
                 else
                 {
-                    sd.hasLoopData = true;
-                    sd.loopFileName = wavFile.getFileName();
-                    writtenFiles.add(wavFile.getFileName());
+                    sd.hasLoopData = false;
+                    sd.loopFileName = {};
+                    sd.overdubLayerCount = 0;
                 }
-
-                sd.overdubLayerCount = 0; // overdubs baked into WAV
             }
             else
             {

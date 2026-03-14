@@ -19,6 +19,14 @@ void AudioChannel::processBlock(const float* const* inputChannelData,
                                 int numInputChannels,
                                 int numOutputChannels)
 {
+    // Oneshot channels use entirely independent processing
+    if (oneShot.load(std::memory_order_relaxed))
+    {
+        processOneShotBlock(inputChannelData, outputChannelData,
+                            numSamples, numInputChannels, numOutputChannels);
+        return;
+    }
+
     checkAndExecutePendingStop(playheadPosition, loopLength, numSamples);
     checkOneShotStop(playheadPosition, loopLength, numSamples);
 
@@ -208,16 +216,112 @@ void AudioChannel::routeOutput(float* const* outputChannelData,
 void AudioChannel::applyGain(juce::AudioBuffer<float>& buffer, int numSamples)
 {
     const float gain = gainLinear.load(std::memory_order_relaxed);
-    
+
     if (gain == 0.0f)
     {
         buffer.clear(0, numSamples);
         return;
     }
-    
+
     if (gain == 1.0f)
         return;  // Unity gain, no processing needed
-    
+
     // Apply gain to both channels
     buffer.applyGain(0, numSamples, gain);
+}
+
+//==============================================================================
+void AudioChannel::processOneShotBlock(const float* const* inputChannelData,
+                                       float* const* outputChannelData,
+                                       int numSamples,
+                                       int numInputChannels,
+                                       int numOutputChannels)
+{
+    // Check oneshot voice completion
+    checkOneShotStop(0, 0, numSamples);
+
+    workingBuffer.clear(0, numSamples);
+    fxBuffer.clear(0, numSamples);
+
+    const bool isMutedNow = muted.load(std::memory_order_relaxed)
+                         || soloMuted.load(std::memory_order_relaxed);
+    const ChannelState currentState = state.load(std::memory_order_relaxed);
+
+    // 1. Route input
+    routeInput(inputChannelData, numInputChannels, numSamples);
+
+    // Input peaks
+    {
+        auto rangeL = juce::FloatVectorOperations::findMinAndMax(workingBuffer.getReadPointer(0), numSamples);
+        auto rangeR = juce::FloatVectorOperations::findMinAndMax(workingBuffer.getReadPointer(1), numSamples);
+        inputPeakL.store(juce::jmax(std::abs(rangeL.getStart()), std::abs(rangeL.getEnd())), std::memory_order_relaxed);
+        inputPeakR.store(juce::jmax(std::abs(rangeR.getStart()), std::abs(rangeR.getEnd())), std::memory_order_relaxed);
+    }
+
+    // 2. Record using oneshot's own playhead
+    if (currentState == ChannelState::Recording)
+    {
+        const juce::int64 pos = oneShotPlayhead.load(std::memory_order_relaxed);
+        recordToLoop(workingBuffer, pos, numSamples, false);
+        oneShotPlayhead.store(pos + numSamples, std::memory_order_release);
+    }
+
+    // 3. Monitor
+    if (shouldMonitor())
+    {
+        for (int ch = 0; ch < fxBuffer.getNumChannels(); ++ch)
+            fxBuffer.addFrom(ch, 0, workingBuffer, ch, 0, numSamples);
+    }
+
+    // 4. Playback: sum all active voices
+    {
+        bool anyVoiceActive = false;
+        const juce::int64 len = oneShotLength.load(std::memory_order_relaxed);
+
+        if (len > 0)
+        {
+            for (auto& voice : oneShotVoices)
+            {
+                juce::int64 pos = voice.load(std::memory_order_relaxed);
+                if (pos < 0 || pos >= len) continue;
+
+                anyVoiceActive = true;
+                workingBuffer.clear(0, numSamples);
+
+                // Read from loop at voice position (no wrap — oneshot doesn't loop)
+                const int samplesToRead = static_cast<int>(
+                    juce::jmin(static_cast<juce::int64>(numSamples), len - pos));
+                if (samplesToRead > 0)
+                    playFromLoop(workingBuffer, pos, samplesToRead);
+
+                applyGain(workingBuffer, numSamples);
+
+                for (int ch = 0; ch < fxBuffer.getNumChannels(); ++ch)
+                    fxBuffer.addFrom(ch, 0, workingBuffer, ch, 0, numSamples);
+
+                voice.store(pos + numSamples, std::memory_order_release);
+            }
+        }
+
+        if (anyVoiceActive)
+        {
+            auto rangeL = juce::FloatVectorOperations::findMinAndMax(fxBuffer.getReadPointer(0), numSamples);
+            auto rangeR = juce::FloatVectorOperations::findMinAndMax(fxBuffer.getReadPointer(1), numSamples);
+            loopPeakL.store(juce::jmax(std::abs(rangeL.getStart()), std::abs(rangeL.getEnd())), std::memory_order_relaxed);
+            loopPeakR.store(juce::jmax(std::abs(rangeR.getStart()), std::abs(rangeR.getEnd())), std::memory_order_relaxed);
+        }
+        else
+        {
+            loopPeakL.store(0.0f, std::memory_order_relaxed);
+            loopPeakR.store(0.0f, std::memory_order_relaxed);
+        }
+    }
+
+    // 5. FX chain
+    juce::MidiBuffer emptyMidi;
+    processFXChain(fxBuffer, numSamples, emptyMidi);
+
+    // 6. Route to output
+    if (!isMutedNow)
+        routeOutput(outputChannelData, fxBuffer, numOutputChannels, numSamples);
 }

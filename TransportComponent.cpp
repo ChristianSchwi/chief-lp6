@@ -56,7 +56,7 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     //--------------------------------------------------------------------------
     // Overdub mode toggle
     overdubButton.setToggleState(audioEngine.isInOverdubMode(), juce::dontSendNotification);
-    overdubButton.setColour(juce::ToggleButton::tickColourId, juce::Colours::orange);
+    overdubButton.setColour(juce::ToggleButton::tickColourId, juce::Colours::yellow);
     overdubButton.setTooltip("Overdub Mode: pressing a channel button while playing starts overdub "
                              "instead of stopping.  [O]");
     overdubButton.onClick = [this] { overdubModeChanged(); };
@@ -239,6 +239,7 @@ TransportComponent::TransportComponent(AudioEngine& engine)
 
     //--------------------------------------------------------------------------
     // A/B/C Sections
+    if (!kFreeVersion)
     {
         static const char* labels[] = { "A", "B", "C" };
         for (int s = 0; s < 3; ++s)
@@ -258,7 +259,8 @@ TransportComponent::TransportComponent(AudioEngine& engine)
     {
         muteGroupToggleButtons[g].setButtonText("G" + juce::String(g + 1));
         muteGroupToggleButtons[g].setClickingTogglesState(false);
-        muteGroupToggleButtons[g].setColour(juce::TextButton::buttonOnColourId, juce::Colours::red);
+        muteGroupToggleButtons[g].setLookAndFeel(&squareBtnLnF);
+        muteGroupToggleButtons[g].setColour(juce::TextButton::buttonOnColourId, juce::Colours::orange);
         muteGroupToggleButtons[g].setTooltip("Toggle mute group " + juce::String(g + 1));
         muteGroupToggleButtons[g].onClick = [this, g]
         {
@@ -285,6 +287,8 @@ TransportComponent::~TransportComponent()
     metroGainSlider  .setLookAndFeel(nullptr);
     autoStartSlider  .setLookAndFeel(nullptr);
     fixedLenSlider   .setLookAndFeel(nullptr);
+    for (int g = 0; g < kMaxMuteGroups; ++g)
+        muteGroupToggleButtons[g].setLookAndFeel(nullptr);
     stopTimer();
 }
 
@@ -309,8 +313,12 @@ void TransportComponent::refreshAfterAudioInit()
 //==============================================================================
 void TransportComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
-    g.setColour(juce::Colours::grey);
+    const auto baseBg = getLookAndFeel()
+                            .findColour(juce::ResizableWindow::backgroundColourId);
+    const auto panelBg = baseBg.darker(0.85f);
+
+    g.fillAll(panelBg);
+    g.setColour(juce::Colour(0xFF444444));
     g.drawRect(getLocalBounds(), 1);
 
     // Title
@@ -318,31 +326,35 @@ void TransportComponent::paint(juce::Graphics& g)
     g.setFont(juce::Font(16.0f, juce::Font::bold));
     g.drawText("Transport", 8, 4, 200, 20, juce::Justification::centredLeft);
 
-    // Section headers: horizontal rule with label badge on the left
-    const int  margin      = 8;
+    // Section blocks with framed boxes — uniform fill
+    const int  margin      = 6;
     const int  headerH     = 14;
-    const auto ruleColour  = juce::Colour(0xFF555555);
-    const auto bgColour    = getLookAndFeel()
-                                 .findColour(juce::ResizableWindow::backgroundColourId);
+    const auto frameColour = juce::Colours::white;
+    const auto labelColour = juce::Colour(0xFFAAAAAA);
+    const auto blockBg     = juce::Colour(0xFF1A1A1A);
 
     g.setFont(juce::Font(9.5f, juce::Font::bold));
 
-    for (const auto& hdr : sectionHeaders)
+    for (int idx = 0; idx < sectionHeaders.size(); ++idx)
     {
-        const int ruleY = hdr.y + headerH / 2;
+        const auto& hdr = sectionHeaders[idx];
+        if (hdr.height <= 0) continue;
 
-        // Full-width rule
-        g.setColour(ruleColour);
-        g.drawHorizontalLine(ruleY, (float)margin, (float)(getWidth() - margin));
+        const auto blockRect = juce::Rectangle<int>(
+            margin, hdr.y + 1,
+            getWidth() - 2 * margin, hdr.height - 2).toFloat();
 
-        // Badge: fill bg behind text so rule is "broken"
-        const int textW = g.getCurrentFont().getStringWidth(hdr.label) + 8;
-        const juce::Rectangle<int> badge (margin + 4, hdr.y, textW, headerH);
-        g.setColour(bgColour);
-        g.fillRect(badge);
+        // Uniform fill for all sections
+        g.setColour(blockBg);
+        g.fillRoundedRectangle(blockRect, 4.0f);
 
-        // Label text
-        g.setColour(ruleColour);
+        // Frame border
+        g.setColour(frameColour);
+        g.drawRoundedRectangle(blockRect, 4.0f, 1.0f);
+
+        // Label inside box, top-left
+        g.setColour(labelColour);
+        const juce::Rectangle<int> badge(margin + 6, hdr.y + 2, 100, headerH);
         g.drawText(hdr.label, badge, juce::Justification::centredLeft, false);
     }
 }
@@ -354,10 +366,15 @@ void TransportComponent::resized()
     area.removeFromTop(24);  // title
 
     const int  hdrH = 14;
-    const int  hdrGap = 3;
+    const int  hdrGap = 4;
     const auto addSection = [&](const char* label)
     {
-        sectionHeaders.add({ area.getY(), label });
+        // Close height of previous section
+        if (sectionHeaders.size() > 0)
+            sectionHeaders.getReference(sectionHeaders.size() - 1).height =
+                area.getY() - sectionHeaders.getReference(sectionHeaders.size() - 1).y;
+
+        sectionHeaders.add({ area.getY(), 0, label });
         area.removeFromTop(hdrH + hdrGap);
     };
 
@@ -375,21 +392,24 @@ void TransportComponent::resized()
         masterGainSlider.setBounds(row);
     }
     area.removeFromTop(2);
-    doubleLoopButton.setBounds(area.removeFromTop(26).reduced(0, 1));
-    area.removeFromTop(2);
-    if (!kFreeVersion)
-        masterRecordButton.setBounds(area.removeFromTop(26).reduced(0, 1));
-    area.removeFromTop(6);
+    {
+        auto row = area.removeFromTop(26);
+        const int half = row.getWidth() / 2;
+        doubleLoopButton.setBounds(row.removeFromLeft(half).reduced(0, 1));
+        if (!kFreeVersion)
+            masterRecordButton.setBounds(row.reduced(0, 1));
+    }
+    area.removeFromTop(16);
 
     // ── ACTIVE CHANNEL ────────────────────────────────────────────────────────
     addSection("ACTIVE CHANNEL");
     {
-        auto row = area.removeFromTop(26);
+        auto row = area.removeFromTop(22);
         prevChannelButton .setBounds(row.removeFromLeft(36).reduced(1));
         nextChannelButton .setBounds(row.removeFromRight(36).reduced(1));
         activeChannelLabel.setBounds(row.reduced(2));
     }
-    area.removeFromTop(6);
+    area.removeFromTop(16);
 
     // ── METRONOME ─────────────────────────────────────────────────────────────
     addSection("METRONOME");
@@ -434,13 +454,16 @@ void TransportComponent::resized()
         countInLabel.setBounds(row.removeFromLeft(labelW));
         countInBox  .setBounds(row);
     }
-    area.removeFromTop(6);
+    area.removeFromTop(16);
 
     // ── RECORDING ─────────────────────────────────────────────────────────────
     addSection("RECORDING");
-    overdubButton  .setBounds(area.removeFromTop(24));
-    area.removeFromTop(4);
-    latchModeButton.setBounds(area.removeFromTop(24));
+    {
+        auto row = area.removeFromTop(24);
+        const int half = row.getWidth() / 2;
+        overdubButton  .setBounds(row.removeFromLeft(half));
+        latchModeButton.setBounds(row);
+    }
     area.removeFromTop(4);
     autoStartButton.setBounds(area.removeFromTop(24));
     {
@@ -448,7 +471,7 @@ void TransportComponent::resized()
         autoStartThreshLabel.setBounds(row.removeFromLeft(65));
         autoStartSlider     .setBounds(row);
     }
-    area.removeFromTop(6);
+    area.removeFromTop(16);
 
     // ── UTILITY ───────────────────────────────────────────────────────────────
     addSection("UTILITY");
@@ -458,17 +481,20 @@ void TransportComponent::resized()
         midiLearnButton .setBounds(row.removeFromLeft(half).reduced(2, 3));
         resetButton     .setBounds(row                    .reduced(2, 3));
     }
-    area.removeFromTop(6);
+    area.removeFromTop(16);
 
     // ── SECTIONS (A/B/C) ─────────────────────────────────────────────────────
-    addSection("SECTIONS");
+    if (!kFreeVersion)
     {
-        auto row = area.removeFromTop(24);
-        const int btnW = row.getWidth() / 3;
-        for (int s = 0; s < 3; ++s)
-            sectionButtons[s].setBounds(row.removeFromLeft(btnW).reduced(1, 1));
+        addSection("SECTIONS");
+        {
+            auto row = area.removeFromTop(24);
+            const int btnW = row.getWidth() / 3;
+            for (int s = 0; s < 3; ++s)
+                sectionButtons[s].setBounds(row.removeFromLeft(btnW).reduced(1, 1));
+        }
+        area.removeFromTop(16);
     }
-    area.removeFromTop(6);
 
     // ── MUTE GROUPS ──────────────────────────────────────────────────────────
     addSection("MUTE GROUPS");
@@ -476,9 +502,14 @@ void TransportComponent::resized()
         auto row = area.removeFromTop(24);
         const int btnW = row.getWidth() / kMaxMuteGroups;
         for (int g = 0; g < kMaxMuteGroups; ++g)
-            muteGroupToggleButtons[g].setBounds(row.removeFromLeft(btnW).reduced(1, 1));
+            muteGroupToggleButtons[g].setBounds(row.removeFromLeft(btnW));
     }
-    area.removeFromTop(6);
+    area.removeFromTop(16);
+
+    // Close height of last section
+    if (sectionHeaders.size() > 0)
+        sectionHeaders.getReference(sectionHeaders.size() - 1).height =
+            area.getY() - sectionHeaders.getReference(sectionHeaders.size() - 1).y;
 }
 
 //==============================================================================
@@ -519,14 +550,16 @@ void TransportComponent::updateDisplay()
         }
     }
 
-    // Tap button blink in sync with BPM
+    // Tap button blink in sync with audio playhead
     {
         const double bpm = audioEngine.getLoopEngine().getBPM();
-        if (bpm > 0.0)
+        const double sr  = audioEngine.getSampleRate();
+        if (bpm > 0.0 && sr > 0.0)
         {
-            const double beatMs = 60000.0 / bpm;
-            const double now = static_cast<double>(juce::Time::getMillisecondCounter());
-            const bool beatOn = std::fmod(now / beatMs, 1.0) < 0.25;
+            const double spb = 60.0 * sr / bpm; // samples per beat
+            const double playhead = static_cast<double>(audioEngine.getLoopEngine().getCurrentPlayhead());
+            const double posInBeat = std::fmod(playhead / spb, 1.0);
+            const bool beatOn = posInBeat < 0.25;
             tapButton.setColour(juce::TextButton::buttonColourId,
                                 beatOn ? juce::Colour(0xFF446688) : juce::Colour(0xFF333333));
         }
@@ -609,7 +642,7 @@ void TransportComponent::updateDisplay()
     // Master recording button visual
     {
         const bool isRec = audioEngine.isMasterRecording();
-        masterRecordButton.setButtonText(isRec ? "STOP Master Rec" : "Rec Master");
+        masterRecordButton.setButtonText(isRec ? "STOP Rec" : "Rec");
         masterRecordButton.setColour(juce::TextButton::buttonColourId,
                                      isRec ? juce::Colours::red : juce::Colour(0xFF333333));
     }
@@ -624,14 +657,15 @@ void TransportComponent::updateMetronomeButtonStates()
     metronomeButton.setEnabled(!hasRecordings);
     metronomeButton.setToggleState(metroEnabled, juce::dontSendNotification);
 
-    // Beat-synced blink for metronome button — bright flash at beat start, then dark
+    // Beat-synced blink for metronome button — sync to audio playhead
     {
         const double bpm = audioEngine.getLoopEngine().getBPM();
-        if (metroEnabled && bpm > 0.0)
+        const double sr  = audioEngine.getSampleRate();
+        if (metroEnabled && bpm > 0.0 && sr > 0.0)
         {
-            const double beatMs = 60000.0 / bpm;
-            const juce::uint32 now = juce::Time::getMillisecondCounter();
-            const double posInBeat = std::fmod(now / beatMs, 1.0);
+            const double spb = 60.0 * sr / bpm;
+            const double playhead = static_cast<double>(audioEngine.getLoopEngine().getCurrentPlayhead());
+            const double posInBeat = std::fmod(playhead / spb, 1.0);
             const bool beatOn = posInBeat < 0.25;
             metronomeButton.setColour(juce::TextButton::buttonColourId,
                                       beatOn ? juce::Colour(0xFF446688) : juce::Colour(0xFF333333));

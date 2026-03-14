@@ -326,7 +326,7 @@ private:
 
     // Atomics (shared between threads)
     std::atomic<bool>  isPlayingFlag        {false};
-    std::atomic<bool>  overdubMode          {false};
+    std::atomic<bool>  overdubMode          {true};
     std::atomic<bool>  latchMode            {false};
     std::atomic<bool>  isInitialised        {false};
     std::atomic<int>   activeChannelIndex   {0};

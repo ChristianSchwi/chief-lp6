@@ -340,6 +340,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
         for (auto& ch : channels)
         {
             if (!ch) continue;
+            if (ch->isOneShot()) continue;  // oneshot is transport-independent
 
             auto cs = ch->getState();
 
@@ -760,6 +761,13 @@ void AudioEngine::processChannelCommand(const Command& cmd)
                     break;
             }
 
+            // Oneshot: start recording immediately, no transport interaction
+            if (channel->isOneShot())
+            {
+                channel->startOneShotRecord();
+                break;
+            }
+
             // Guard 2: count-in already pending for this exact channel — ignore duplicate
             if (countInActive.load(std::memory_order_relaxed) &&
                 pendingRecordChannel.load(std::memory_order_relaxed) == cmd.channelIndex)
@@ -852,6 +860,13 @@ void AudioEngine::processChannelCommand(const Command& cmd)
 
         case CommandType::StopRecord:
         {
+            // Oneshot: stop using channel's own playhead
+            if (channel->isOneShot())
+            {
+                channel->stopOneShotRecord(channel->getOneShotPlayhead());
+                break;
+            }
+
             // Cancel any fixed-length countdown for this channel
             if (fixedLengthChannel.load(std::memory_order_relaxed) == cmd.channelIndex)
                 fixedLengthActive.store(false, std::memory_order_release);
@@ -963,6 +978,11 @@ void AudioEngine::processChannelCommand(const Command& cmd)
 
         case CommandType::StartPlayback:
         {
+            if (channel->isOneShot())
+            {
+                channel->triggerOneShotPlayback();
+                break;
+            }
             const juce::int64 loopLen = loopEngine->getLoopLength();
             if (latchMode.load(std::memory_order_relaxed) && loopLen > 0
                 && isPlayingFlag.load(std::memory_order_relaxed))
@@ -974,6 +994,11 @@ void AudioEngine::processChannelCommand(const Command& cmd)
 
         case CommandType::StopPlayback:
         {
+            if (channel->isOneShot())
+            {
+                channel->stopAllOneShotVoices();
+                break;
+            }
             if (latchMode.load(std::memory_order_relaxed) && loopEngine->getLoopLength() > 0)
                 channel->requestStopAtLoopEnd();
             else
@@ -1130,12 +1155,12 @@ void AudioEngine::setPlaying(bool shouldPlay)
 {
     if (!shouldPlay)
     {
-        // Memorize which channels are currently playing or overdubbing
+        // Memorize which channels are currently playing or overdubbing (skip oneshot)
         uint8_t mask = 0;
         for (int i = 0; i < 6; ++i)
         {
             auto* ch = channels[i].get();
-            if (ch)
+            if (ch && !ch->isOneShot())
             {
                 const auto st = ch->getState();
                 if (st == ChannelState::Playing || st == ChannelState::Overdubbing)
@@ -1153,9 +1178,9 @@ void AudioEngine::setPlaying(bool shouldPlay)
 
     if (shouldPlay)
     {
-        // Start all channels that have recordings
+        // Start all channels that have recordings (skip oneshot — they're independent)
         for (int i = 0; i < 6; ++i)
-            if (channels[i] && channels[i]->hasLoop())
+            if (channels[i] && channels[i]->hasLoop() && !channels[i]->isOneShot())
                 sendCommand(Command::startPlayback(i));
     }
 }

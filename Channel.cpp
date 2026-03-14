@@ -40,7 +40,11 @@ static bool pluginCallProcessBlock (juce::AudioPluginInstance* p,
 
 //==============================================================================
 Channel::Channel(int index, ChannelType type)
-    : channelIndex(index), channelType(type) {}
+    : channelIndex(index), channelType(type)
+{
+    for (auto& v : oneShotVoices)
+        v.store(-1, std::memory_order_relaxed);
+}
 
 //==============================================================================
 void Channel::prepareToPlay(double newSampleRate, int newMaxBlockSize,
@@ -215,16 +219,87 @@ void Channel::requestPlayAtLoopEnd()
     playPending.store(true, std::memory_order_release);
 }
 
+void Channel::startOneShotRecord()
+{
+    const int s = activeSection.load(std::memory_order_relaxed);
+    auto& sec = sections[s];
+    sec.overdubLayers.clear();
+    sec.activeOverdubLayerIdx = -1;
+    oneShotPlayhead.store(0, std::memory_order_release);
+    oneShotLength.store(0, std::memory_order_release);
+    state.store(ChannelState::Recording, std::memory_order_release);
+}
+
+void Channel::stopOneShotRecord(juce::int64 recordedSamples)
+{
+    if (recordedSamples > 0)
+    {
+        oneShotLength.store(recordedSamples, std::memory_order_release);
+        const int s = activeSection.load(std::memory_order_relaxed);
+        sections[s].loopHasContent.store(true, std::memory_order_release);
+    }
+    state.store(ChannelState::Idle, std::memory_order_release);
+}
+
+void Channel::triggerOneShotPlayback()
+{
+    const juce::int64 len = oneShotLength.load(std::memory_order_relaxed);
+    if (len <= 0) return;
+
+    // Find first inactive voice slot
+    for (auto& v : oneShotVoices)
+    {
+        if (v.load(std::memory_order_relaxed) < 0)
+        {
+            v.store(0, std::memory_order_release);
+            return;
+        }
+    }
+
+    // All slots busy — steal the oldest (highest playhead)
+    int oldestIdx = 0;
+    juce::int64 oldestPos = 0;
+    for (int i = 0; i < kMaxOneShotVoices; ++i)
+    {
+        juce::int64 pos = oneShotVoices[i].load(std::memory_order_relaxed);
+        if (pos > oldestPos)
+        {
+            oldestPos = pos;
+            oldestIdx = i;
+        }
+    }
+    oneShotVoices[oldestIdx].store(0, std::memory_order_release);
+}
+
+void Channel::stopAllOneShotVoices()
+{
+    for (auto& v : oneShotVoices)
+        v.store(-1, std::memory_order_release);
+}
+
+bool Channel::isOneShotPlaying() const
+{
+    for (const auto& v : oneShotVoices)
+        if (v.load(std::memory_order_relaxed) >= 0)
+            return true;
+    return false;
+}
+
 void Channel::checkOneShotStop(juce::int64 playheadPosition,
                                 juce::int64 loopLength, int numSamples)
 {
     if (!oneShot.load(std::memory_order_relaxed)) return;
-    if (state.load(std::memory_order_relaxed) != ChannelState::Playing) return;
-    if (loopLength <= 0) return;
 
-    // Detect wrap: playhead just crossed 0 (position < numSamples means it wrapped this block)
-    if (playheadPosition < static_cast<juce::int64>(numSamples))
-        stopPlayback();
+    // For oneshot channels, check each voice against oneShotLength
+    const juce::int64 len = oneShotLength.load(std::memory_order_relaxed);
+    if (len <= 0) return;
+
+    for (auto& v : oneShotVoices)
+    {
+        juce::int64 pos = v.load(std::memory_order_relaxed);
+        if (pos >= 0 && pos >= len)
+            v.store(-1, std::memory_order_release);
+    }
 }
 
 void Channel::checkAndExecutePendingStop(juce::int64 playheadPosition,
